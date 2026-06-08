@@ -1,0 +1,46 @@
+[package]
+name = "me-sh"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.94"
+license = "GPL-3.0-or-later"
+description = "Command-line tools for me.sh."
+homepage = "https://me.sh"
+documentation = "https://docs.rs/me-sh"
+repository = "https://github.com/sigkillme0/me-sh"
+readme = "README.md"
+keywords = ["mesh", "cli", "contacts", "snapshots"]
+categories = ["command-line-utilities"]
+include = [
+    "/Cargo.lock",
+    "/Cargo.toml",
+    "/LICENSE",
+    "/Makefile",
+    "/README.md",
+    "/RELEASE.md",
+    "/src/**",
+]
+
+[[bin]]
+name = "mesh"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.1", features = ["derive", "env", "string"] }
+clap_complete = "4.6.5"
+comfy-table = "7.2.2"
+csv = "1.4.0"
+directories = "6.0.0"
+miette = { version = "7.6.0", features = ["fancy"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["form", "json", "rustls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tar = { version = "0.4.46", default-features = false }
+hex = "0.4.3"
+sha2 = "0.11.0"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.8"
+zstd = "0.13.3"
