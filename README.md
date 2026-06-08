@@ -4,7 +4,7 @@ command-line tools for me.sh.
 
 `mesh` lets you inspect contacts, groups, activity, routes, and local snapshots from the terminal. reads are easy to run. writes need `--yes`, and most write paths can print a `--dry-run` plan first.
 
-status: alpha. the tool works locally and has unit coverage, but the release path is still being built.
+status: alpha. the cli is published on crates.io, works locally, and has unit coverage. macos is the only claimed local platform so far.
 
 ## limits
 
@@ -19,13 +19,13 @@ status: alpha. the tool works locally and has unit coverage, but the release pat
 
 ## install
 
-published releases install from crates.io:
+install from crates.io:
 
 ```sh
 cargo install me-sh --locked
 ```
 
-until the first crates.io release, install from this checkout:
+source checkout install, for local development or testing unreleased changes:
 
 ```sh
 cargo install --path . --locked
@@ -153,7 +153,7 @@ snapshot packaging may create `.meshx-index/` sidecars and `.meshx-package.json`
 ## development
 
 ```sh
-git clone <repo-url>
+git clone https://github.com/sigkillme0/me-sh.git
 cd me-sh
 cargo build
 make check
@@ -179,16 +179,12 @@ release is verification, not just a tag.
 
 ```sh
 make check
+cargo package --list
 cargo publish --dry-run
-```
-
-then tag, publish, and test the published install:
-
-```sh
-git tag v0.2.0
-git push origin main v0.2.0
+git tag vX.Y.Z
+git push origin main vX.Y.Z
 cargo publish
-cargo install me-sh --version 0.2.0 --locked
+cargo install me-sh --version X.Y.Z --locked
 mesh --version
 mesh --help
 ```
