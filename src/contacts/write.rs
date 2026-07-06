@@ -26,21 +26,54 @@ pub(crate) struct NotesBulkCreateOptions {
     pub(crate) flat: bool,
 }
 
+/// Target contacts resolved from explicit `--contact-ids` plus an optional
+/// `--from-search` payload. Shared by every bulk write plan.
 #[derive(Clone, Debug)]
-pub(crate) struct NotesBulkCreatePlan {
+pub(crate) struct ContactBulkTargets {
     pub(crate) target_source: String,
     pub(crate) explicit_ids: Vec<u64>,
     pub(crate) search_payload: Option<Map<String, Value>>,
     pub(crate) search_exported_count: Option<usize>,
     pub(crate) search_match_count: Option<usize>,
     pub(crate) target_ids: Vec<u64>,
+}
+
+/// Common shape of every bulk write plan: resolved targets, one prepared
+/// action per request, and the shared pagination/concurrency knobs. `D` holds
+/// the command-specific detail (note content, archive/restore kind, updates).
+#[derive(Clone, Debug)]
+pub(crate) struct ContactBulkPlan<D> {
+    pub(crate) targets: ContactBulkTargets,
     pub(crate) actions: Vec<ContactApplyAction>,
-    pub(crate) content: String,
-    pub(crate) reminder_date: Option<String>,
     pub(crate) page_size: usize,
     pub(crate) target_limit: Option<usize>,
     pub(crate) concurrency: usize,
+    pub(crate) detail: D,
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct NotesBulkCreateDetail {
+    pub(crate) content: String,
+    pub(crate) reminder_date: Option<String>,
+}
+
+pub(crate) type NotesBulkCreatePlan = ContactBulkPlan<NotesBulkCreateDetail>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct ContactBulkStateDetail {
+    pub(crate) kind: ApplyKind,
+    pub(crate) command: &'static str,
+    pub(crate) chunk_size: usize,
+}
+
+pub(crate) type ContactBulkStatePlan = ContactBulkPlan<ContactBulkStateDetail>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct ContactBulkUpdateDetail {
+    pub(crate) mutation_payload: Map<String, Value>,
+}
+
+pub(crate) type ContactBulkUpdatePlan = ContactBulkPlan<ContactBulkUpdateDetail>;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ContactBulkStateOptions {
@@ -56,23 +89,6 @@ pub(crate) struct ContactBulkStateOptions {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ContactBulkStatePlan {
-    pub(crate) kind: ApplyKind,
-    pub(crate) command: &'static str,
-    pub(crate) target_source: String,
-    pub(crate) explicit_ids: Vec<u64>,
-    pub(crate) search_payload: Option<Map<String, Value>>,
-    pub(crate) search_exported_count: Option<usize>,
-    pub(crate) search_match_count: Option<usize>,
-    pub(crate) target_ids: Vec<u64>,
-    pub(crate) actions: Vec<ContactApplyAction>,
-    pub(crate) page_size: usize,
-    pub(crate) target_limit: Option<usize>,
-    pub(crate) chunk_size: usize,
-    pub(crate) concurrency: usize,
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct ContactBulkUpdateOptions {
     pub(crate) target_ids: Vec<u64>,
     pub(crate) search_payload: Option<Map<String, Value>>,
@@ -83,19 +99,41 @@ pub(crate) struct ContactBulkUpdateOptions {
     pub(crate) flat: bool,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct ContactBulkUpdatePlan {
-    pub(crate) target_source: String,
-    pub(crate) explicit_ids: Vec<u64>,
-    pub(crate) search_payload: Option<Map<String, Value>>,
-    pub(crate) search_exported_count: Option<usize>,
-    pub(crate) search_match_count: Option<usize>,
-    pub(crate) target_ids: Vec<u64>,
-    pub(crate) actions: Vec<ContactApplyAction>,
-    pub(crate) mutation_payload: Map<String, Value>,
-    pub(crate) page_size: usize,
-    pub(crate) target_limit: Option<usize>,
-    pub(crate) concurrency: usize,
+/// The parsed `--contact-ids` / `--from-search` target selection flags shared
+/// by every bulk write command.
+struct BulkTargetSelection {
+    target_ids: Vec<u64>,
+    search_payload: Option<Map<String, Value>>,
+}
+
+/// Parse the shared `--contact-ids` / `--from-search` / `--all-search` target
+/// selection flags. Every bulk write command validates them identically.
+fn bulk_target_selection_from_matches(
+    matches: &ArgMatches,
+    command: &str,
+) -> Result<BulkTargetSelection> {
+    let target_ids = target_contact_ids_from_matches(matches, "contact-ids")?;
+    let from_search = matches.get_flag("from-search");
+    let all_search = matches.get_flag("all-search");
+    if all_search && !from_search {
+        return err(format!("{command} --all-search requires --from-search"));
+    }
+    let search_payload = if from_search {
+        Some(search_target_payload_from_matches(
+            matches, all_search, command,
+        )?)
+    } else {
+        None
+    };
+    if target_ids.is_empty() && search_payload.is_none() {
+        return err(format!(
+            "{command} requires --contact-ids, --input, or --from-search"
+        ));
+    }
+    Ok(BulkTargetSelection {
+        target_ids,
+        search_payload,
+    })
 }
 
 impl NotesBulkCreateOptions {
@@ -108,24 +146,10 @@ impl NotesBulkCreateOptions {
         if content.is_empty() {
             return err("--content must not be empty");
         }
-        let target_ids = target_contact_ids_from_matches(matches, "contact-ids")?;
-        let from_search = matches.get_flag("from-search");
-        let all_search = matches.get_flag("all-search");
-        if all_search && !from_search {
-            return err("notes:bulk-create --all-search requires --from-search");
-        }
-        let search_payload = if from_search {
-            Some(search_target_payload_from_matches(
-                matches,
-                all_search,
-                "notes:bulk-create",
-            )?)
-        } else {
-            None
-        };
-        if target_ids.is_empty() && search_payload.is_none() {
-            return err("notes:bulk-create requires --contact-ids, --input, or --from-search");
-        }
+        let BulkTargetSelection {
+            target_ids,
+            search_payload,
+        } = bulk_target_selection_from_matches(matches, "notes:bulk-create")?;
         Ok(Self {
             target_ids,
             search_payload,
@@ -152,24 +176,10 @@ impl ContactBulkStateOptions {
         if !matches!(kind, ApplyKind::Archive | ApplyKind::Restore) {
             return err("contact bulk state action must be archive or restore");
         }
-        let target_ids = target_contact_ids_from_matches(matches, "contact-ids")?;
-        let from_search = matches.get_flag("from-search");
-        let all_search = matches.get_flag("all-search");
-        if all_search && !from_search {
-            return err(format!("{command} --all-search requires --from-search"));
-        }
-        let search_payload = if from_search {
-            Some(search_target_payload_from_matches(
-                matches, all_search, command,
-            )?)
-        } else {
-            None
-        };
-        if target_ids.is_empty() && search_payload.is_none() {
-            return err(format!(
-                "{command} requires --contact-ids, --input, or --from-search"
-            ));
-        }
+        let BulkTargetSelection {
+            target_ids,
+            search_payload,
+        } = bulk_target_selection_from_matches(matches, command)?;
         Ok(Self {
             kind,
             command,
@@ -187,24 +197,10 @@ impl ContactBulkStateOptions {
 
 impl ContactBulkUpdateOptions {
     pub(crate) fn from_matches(matches: &ArgMatches) -> Result<Self> {
-        let target_ids = target_contact_ids_from_matches(matches, "contact-ids")?;
-        let from_search = matches.get_flag("from-search");
-        let all_search = matches.get_flag("all-search");
-        if all_search && !from_search {
-            return err("contacts:bulk-update --all-search requires --from-search");
-        }
-        let search_payload = if from_search {
-            Some(search_target_payload_from_matches(
-                matches,
-                all_search,
-                "contacts:bulk-update",
-            )?)
-        } else {
-            None
-        };
-        if target_ids.is_empty() && search_payload.is_none() {
-            return err("contacts:bulk-update requires --contact-ids, --input, or --from-search");
-        }
+        let BulkTargetSelection {
+            target_ids,
+            search_payload,
+        } = bulk_target_selection_from_matches(matches, "contacts:bulk-update")?;
         let mutation_spec = CommandSpec {
             name: "contacts:bulk-update",
             tool_name: "updateContact",
@@ -450,45 +446,60 @@ pub(crate) fn contact_apply_note_payload(row: &Map<String, Value>) -> Result<Map
     Ok(payload)
 }
 
+/// Fan actions out through `run_bulk_tool_calls`, building one report row per
+/// action with `row_value` and counting failed calls. Shared by every bulk
+/// write apply function.
+async fn collect_bulk_action_results(
+    runtime: &Runtime,
+    actions: Vec<ContactApplyAction>,
+    concurrency: usize,
+    join_context: &str,
+    mut row_value: impl FnMut(&ContactApplyAction, &Result<Value>) -> Value,
+) -> Result<(Vec<Value>, u64)> {
+    let outcomes = run_bulk_tool_calls(runtime, actions, concurrency, join_context, |action| {
+        (action.route, Value::Object(action.payload.clone()))
+    })
+    .await?;
+    let mut results = Vec::with_capacity(outcomes.len());
+    let mut failures = 0_u64;
+    for (action, result) in outcomes {
+        if result.is_err() {
+            failures = failures.saturating_add(1);
+        }
+        results.push(row_value(&action, &result));
+    }
+    Ok((results, failures))
+}
+
 pub(crate) async fn apply_contact_actions(
     runtime: &Runtime,
     actions: Vec<ContactApplyAction>,
     concurrency: usize,
 ) -> Result<Value> {
-    let mut results = Vec::with_capacity(actions.len());
-    let mut failures = 0_u64;
-    let outcomes = run_bulk_tool_calls(
+    let (results, failures) = collect_bulk_action_results(
         runtime,
         actions,
         concurrency,
         "joining contacts:apply write task",
-        |action| (action.route, Value::Object(action.payload.clone())),
+        |action, result| match result {
+            Ok(data) => json!({
+                "row": action.row,
+                "action": action.kind.as_str(),
+                "route": format!("/tools/v2{}", action.route),
+                "ok": true,
+                "result_id": record_id(data),
+                "result": data,
+            }),
+            Err(error) => json!({
+                "row": action.row,
+                "action": action.kind.as_str(),
+                "route": format!("/tools/v2{}", action.route),
+                "ok": false,
+                "error": error.to_string(),
+            }),
+        },
     )
     .await?;
-    for (action, result) in outcomes {
-        match result {
-            Ok(data) => {
-                results.push(json!({
-                    "row": action.row,
-                    "action": action.kind.as_str(),
-                    "route": format!("/tools/v2{}", action.route),
-                    "ok": true,
-                    "result_id": record_id(&data),
-                    "result": data,
-                }));
-            }
-            Err(error) => {
-                failures = failures.saturating_add(1);
-                results.push(json!({
-                    "row": action.row,
-                    "action": action.kind.as_str(),
-                    "route": format!("/tools/v2{}", action.route),
-                    "ok": false,
-                    "error": error.to_string(),
-                }));
-            }
-        }
-    }
     Ok(json!({
         "ok": failures == 0,
         "changed_count": results.len().saturating_sub(failures as usize),
@@ -506,44 +517,43 @@ pub(crate) fn contact_apply_action_value(action: &ContactApplyAction) -> Value {
     })
 }
 
-pub(crate) async fn notes_bulk_create_plan(
+/// Resolve bulk write targets: explicit IDs first (capped by `target_limit`),
+/// then IDs streamed from the search payload, deduplicated and capped again.
+/// Errors when zero targets remain.
+async fn resolve_contact_bulk_targets(
     runtime: &Runtime,
-    options: &NotesBulkCreateOptions,
-) -> Result<NotesBulkCreatePlan> {
-    let explicit_ids = options.target_ids.clone();
+    command: &str,
+    explicit_ids: Vec<u64>,
+    search_payload: Option<&Map<String, Value>>,
+    page_size: usize,
+    target_limit: Option<usize>,
+) -> Result<ContactBulkTargets> {
     let mut target_ids = explicit_ids.clone();
-    if let Some(limit) = options.target_limit {
+    if let Some(limit) = target_limit {
         target_ids.truncate(limit);
     }
 
     let mut search_exported_count = None;
     let mut search_match_count = None;
-    if let Some(search_payload) = &options.search_payload {
-        let remaining = options
-            .target_limit
-            .map(|limit| limit.saturating_sub(target_ids.len()));
+    if let Some(search_payload) = search_payload {
+        let remaining = target_limit.map(|limit| limit.saturating_sub(target_ids.len()));
         if remaining != Some(0) {
             let mut payload = search_payload.clone();
             append_exclude_contact_ids(&mut payload, &target_ids)?;
             let mut search_ids = Vec::new();
-            let (exported, total) = export_contacts_each_limited(
-                runtime,
-                payload,
-                options.page_size,
-                remaining,
-                |row| {
+            let (exported, total) =
+                export_contacts_each_limited(runtime, payload, page_size, remaining, |row| {
                     let id = contact_id_from_value(&row)
                         .ok_or_else(|| miette!("me.sh search row did not include numeric id"))?;
                     search_ids.push(id);
                     Ok(())
-                },
-            )
-            .await?;
+                })
+                .await?;
             search_exported_count = Some(exported);
             search_match_count = Some(total);
             target_ids.extend(search_ids);
             target_ids = dedupe_ids(target_ids);
-            if let Some(limit) = options.target_limit {
+            if let Some(limit) = target_limit {
                 target_ids.truncate(limit);
             }
         } else {
@@ -553,10 +563,42 @@ pub(crate) async fn notes_bulk_create_plan(
     }
 
     if target_ids.is_empty() {
-        return err("notes:bulk-create resolved zero target contacts");
+        return err(format!("{command} resolved zero target contacts"));
     }
 
-    let actions = target_ids
+    let target_source = match (explicit_ids.is_empty(), search_payload.is_some()) {
+        (false, true) => "explicit+search",
+        (false, false) => "explicit",
+        (true, true) => "search",
+        (true, false) => "none",
+    }
+    .to_string();
+
+    Ok(ContactBulkTargets {
+        target_source,
+        explicit_ids,
+        search_payload: search_payload.cloned(),
+        search_exported_count,
+        search_match_count,
+        target_ids,
+    })
+}
+
+pub(crate) async fn notes_bulk_create_plan(
+    runtime: &Runtime,
+    options: &NotesBulkCreateOptions,
+) -> Result<NotesBulkCreatePlan> {
+    let targets = resolve_contact_bulk_targets(
+        runtime,
+        "notes:bulk-create",
+        options.target_ids.clone(),
+        options.search_payload.as_ref(),
+        options.page_size,
+        options.target_limit,
+    )
+    .await?;
+    let actions = targets
+        .target_ids
         .iter()
         .enumerate()
         .map(|(index, id)| {
@@ -567,28 +609,17 @@ pub(crate) async fn notes_bulk_create_plan(
                 options.reminder_date.as_ref(),
             )
         })
-        .collect::<Vec<_>>();
-    let target_source = match (explicit_ids.is_empty(), options.search_payload.is_some()) {
-        (false, true) => "explicit+search",
-        (false, false) => "explicit",
-        (true, true) => "search",
-        (true, false) => "none",
-    }
-    .to_string();
-
-    Ok(NotesBulkCreatePlan {
-        target_source,
-        explicit_ids,
-        search_payload: options.search_payload.clone(),
-        search_exported_count,
-        search_match_count,
-        target_ids,
+        .collect();
+    Ok(ContactBulkPlan {
+        targets,
         actions,
-        content: options.content.clone(),
-        reminder_date: options.reminder_date.clone(),
         page_size: options.page_size,
         target_limit: options.target_limit,
         concurrency: options.concurrency,
+        detail: NotesBulkCreateDetail {
+            content: options.content.clone(),
+            reminder_date: options.reminder_date.clone(),
+        },
     })
 }
 
@@ -618,40 +649,50 @@ pub(crate) fn notes_bulk_create_action(
     }
 }
 
+/// The `filters` object shared by every bulk plan report.
+fn contact_bulk_filters_value<D>(plan: &ContactBulkPlan<D>) -> Value {
+    json!({
+        "contact_ids": plan.targets.explicit_ids,
+        "from_search": plan.targets.search_payload.is_some(),
+        "search_payload": plan.targets.search_payload,
+        "target_limit": plan.target_limit,
+    })
+}
+
+/// The `/tools/v2/search` step shared by every bulk plan report.
+fn contact_bulk_search_step_value<D>(plan: &ContactBulkPlan<D>, purpose: &str) -> Value {
+    json!({
+        "route": "/tools/v2/search",
+        "enabled": plan.targets.search_payload.is_some(),
+        "payload": "same search filters with limit set to page_size and exclude_contact_ids accumulated from explicit/prior IDs",
+        "page_size": plan.page_size,
+        "purpose": purpose,
+    })
+}
+
 pub(crate) fn notes_bulk_create_plan_value(plan: &NotesBulkCreatePlan) -> Value {
     json!({
         "source": "live",
-        "target_source": plan.target_source,
-        "filters": {
-            "contact_ids": plan.explicit_ids,
-            "from_search": plan.search_payload.is_some(),
-            "search_payload": plan.search_payload,
-            "target_limit": plan.target_limit,
-        },
+        "target_source": plan.targets.target_source,
+        "filters": contact_bulk_filters_value(plan),
         "note": {
-            "content": plan.content,
-            "reminder_date": plan.reminder_date,
+            "content": plan.detail.content,
+            "reminder_date": plan.detail.reminder_date,
         },
         "summary": {
-            "target_count": plan.target_ids.len(),
-            "explicit_count": plan.explicit_ids.len(),
-            "search_exported_count": plan.search_exported_count,
-            "search_match_count": plan.search_match_count,
+            "target_count": plan.targets.target_ids.len(),
+            "explicit_count": plan.targets.explicit_ids.len(),
+            "search_exported_count": plan.targets.search_exported_count,
+            "search_match_count": plan.targets.search_match_count,
             "write_required": !plan.actions.is_empty(),
         },
         "page_size": plan.page_size,
         "concurrency": plan.concurrency,
         "plan": [
-            {
-                "route": "/tools/v2/search",
-                "enabled": plan.search_payload.is_some(),
-                "payload": "same search filters with limit set to page_size and exclude_contact_ids accumulated from explicit/prior IDs",
-                "page_size": plan.page_size,
-                "purpose": "resolve note target contact IDs without writes",
-            },
+            contact_bulk_search_step_value(plan, "resolve note target contact IDs without writes"),
             {
                 "route": "/tools/v2/note",
-                "payload": {"contact_id": "one target ID per request", "content": plan.content, "reminder_date": plan.reminder_date},
+                "payload": {"contact_id": "one target ID per request", "content": plan.detail.content, "reminder_date": plan.detail.reminder_date},
                 "concurrency": plan.concurrency,
                 "purpose": "create one note/reminder per target contact; requires --yes outside dry-run",
             }
@@ -664,61 +705,53 @@ pub(crate) async fn apply_notes_bulk_create(
     runtime: &Runtime,
     plan: &NotesBulkCreatePlan,
 ) -> Result<Value> {
-    let mut results = Vec::with_capacity(plan.actions.len());
-    let mut failures = 0_u64;
-    let outcomes = run_bulk_tool_calls(
+    let (results, failures) = collect_bulk_action_results(
         runtime,
         plan.actions.clone(),
         plan.concurrency,
         "joining notes:bulk-create write task",
-        |action| (action.route, Value::Object(action.payload.clone())),
-    )
-    .await?;
-    for (action, result) in outcomes {
-        let contact_id = action
-            .payload
-            .get("contact_id")
-            .cloned()
-            .unwrap_or(Value::Null);
-        match result {
-            Ok(data) => {
-                results.push(json!({
+        |action, result| {
+            let contact_id = action
+                .payload
+                .get("contact_id")
+                .cloned()
+                .unwrap_or(Value::Null);
+            match result {
+                Ok(data) => json!({
                     "row": action.row,
                     "contact_id": contact_id,
                     "route": format!("/tools/v2{}", action.route),
                     "ok": true,
-                    "content": plan.content,
-                    "reminder_date": plan.reminder_date,
-                    "result_id": record_id(&data),
+                    "content": plan.detail.content,
+                    "reminder_date": plan.detail.reminder_date,
+                    "result_id": record_id(data),
                     "result": data,
-                }));
-            }
-            Err(error) => {
-                failures = failures.saturating_add(1);
-                results.push(json!({
+                }),
+                Err(error) => json!({
                     "row": action.row,
                     "contact_id": contact_id,
                     "route": format!("/tools/v2{}", action.route),
                     "ok": false,
-                    "content": plan.content,
-                    "reminder_date": plan.reminder_date,
+                    "content": plan.detail.content,
+                    "reminder_date": plan.detail.reminder_date,
                     "error": error.to_string(),
-                }));
+                }),
             }
-        }
-    }
+        },
+    )
+    .await?;
     Ok(json!({
         "source": "live",
-        "target_source": plan.target_source,
+        "target_source": plan.targets.target_source,
         "summary": {
-            "target_count": plan.target_ids.len(),
+            "target_count": plan.targets.target_ids.len(),
             "changed_count": results.len().saturating_sub(failures as usize),
             "failure_count": failures,
             "ok": failures == 0,
         },
         "note": {
-            "content": plan.content,
-            "reminder_date": plan.reminder_date,
+            "content": plan.detail.content,
+            "reminder_date": plan.detail.reminder_date,
         },
         "results": results,
     }))
@@ -733,19 +766,20 @@ pub(crate) fn notes_bulk_create_action_value(action: &ContactApplyAction) -> Val
     })
 }
 
-pub(crate) fn notes_bulk_create_rows(report: &Value) -> Value {
+/// Flatten a plan or apply report into per-action rows for `--flat` output,
+/// reading `results` (apply reports) or `actions` (plan reports).
+fn contact_bulk_report_rows(report: &Value, row: fn(&Value) -> Option<Value>) -> Value {
     let rows = report
         .get("results")
         .or_else(|| report.get("actions"))
         .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(notes_bulk_create_row)
-                .collect::<Vec<_>>()
-        })
+        .map(|items| items.iter().filter_map(row).collect::<Vec<_>>())
         .unwrap_or_default();
     Value::Array(rows)
+}
+
+pub(crate) fn notes_bulk_create_rows(report: &Value) -> Value {
+    contact_bulk_report_rows(report, notes_bulk_create_row)
 }
 
 pub(crate) fn notes_bulk_create_row(value: &Value) -> Option<Value> {
@@ -779,79 +813,32 @@ pub(crate) async fn contact_bulk_state_plan(
     runtime: &Runtime,
     options: &ContactBulkStateOptions,
 ) -> Result<ContactBulkStatePlan> {
-    let explicit_ids = options.target_ids.clone();
-    let mut target_ids = explicit_ids.clone();
-    if let Some(limit) = options.target_limit {
-        target_ids.truncate(limit);
-    }
-
-    let mut search_exported_count = None;
-    let mut search_match_count = None;
-    if let Some(search_payload) = &options.search_payload {
-        let remaining = options
-            .target_limit
-            .map(|limit| limit.saturating_sub(target_ids.len()));
-        if remaining != Some(0) {
-            let mut payload = search_payload.clone();
-            append_exclude_contact_ids(&mut payload, &target_ids)?;
-            let mut search_ids = Vec::new();
-            let (exported, total) = export_contacts_each_limited(
-                runtime,
-                payload,
-                options.page_size,
-                remaining,
-                |row| {
-                    let id = contact_id_from_value(&row)
-                        .ok_or_else(|| miette!("me.sh search row did not include numeric id"))?;
-                    search_ids.push(id);
-                    Ok(())
-                },
-            )
-            .await?;
-            search_exported_count = Some(exported);
-            search_match_count = Some(total);
-            target_ids.extend(search_ids);
-            target_ids = dedupe_ids(target_ids);
-            if let Some(limit) = options.target_limit {
-                target_ids.truncate(limit);
-            }
-        } else {
-            search_exported_count = Some(0);
-            search_match_count = Some(0);
-        }
-    }
-
-    if target_ids.is_empty() {
-        return err(format!("{} resolved zero target contacts", options.command));
-    }
-
-    let actions = target_ids
+    let targets = resolve_contact_bulk_targets(
+        runtime,
+        options.command,
+        options.target_ids.clone(),
+        options.search_payload.as_ref(),
+        options.page_size,
+        options.target_limit,
+    )
+    .await?;
+    let actions = targets
+        .target_ids
         .chunks(options.chunk_size)
         .enumerate()
         .map(|(index, ids)| contact_bulk_state_action(index + 1, options.kind, ids))
-        .collect::<Vec<_>>();
-    let target_source = match (explicit_ids.is_empty(), options.search_payload.is_some()) {
-        (false, true) => "explicit+search",
-        (false, false) => "explicit",
-        (true, true) => "search",
-        (true, false) => "none",
-    }
-    .to_string();
-
-    Ok(ContactBulkStatePlan {
-        kind: options.kind,
-        command: options.command,
-        target_source,
-        explicit_ids,
-        search_payload: options.search_payload.clone(),
-        search_exported_count,
-        search_match_count,
-        target_ids,
+        .collect();
+    Ok(ContactBulkPlan {
+        targets,
         actions,
         page_size: options.page_size,
         target_limit: options.target_limit,
-        chunk_size: options.chunk_size,
         concurrency: options.concurrency,
+        detail: ContactBulkStateDetail {
+            kind: options.kind,
+            command: options.command,
+            chunk_size: options.chunk_size,
+        },
     })
 }
 
@@ -873,39 +860,28 @@ pub(crate) fn contact_bulk_state_action(
 pub(crate) fn contact_bulk_state_plan_value(plan: &ContactBulkStatePlan) -> Value {
     json!({
         "source": "live",
-        "action": plan.kind.as_str(),
-        "target_source": plan.target_source,
-        "filters": {
-            "contact_ids": plan.explicit_ids,
-            "from_search": plan.search_payload.is_some(),
-            "search_payload": plan.search_payload,
-            "target_limit": plan.target_limit,
-        },
+        "action": plan.detail.kind.as_str(),
+        "target_source": plan.targets.target_source,
+        "filters": contact_bulk_filters_value(plan),
         "summary": {
-            "target_count": plan.target_ids.len(),
-            "explicit_count": plan.explicit_ids.len(),
-            "search_exported_count": plan.search_exported_count,
-            "search_match_count": plan.search_match_count,
+            "target_count": plan.targets.target_ids.len(),
+            "explicit_count": plan.targets.explicit_ids.len(),
+            "search_exported_count": plan.targets.search_exported_count,
+            "search_match_count": plan.targets.search_match_count,
             "chunk_count": plan.actions.len(),
             "write_required": !plan.actions.is_empty(),
         },
         "page_size": plan.page_size,
-        "chunk_size": plan.chunk_size,
+        "chunk_size": plan.detail.chunk_size,
         "concurrency": plan.concurrency,
         "plan": [
+            contact_bulk_search_step_value(plan, "resolve target contact IDs without writes"),
             {
-                "route": "/tools/v2/search",
-                "enabled": plan.search_payload.is_some(),
-                "payload": "same search filters with limit set to page_size and exclude_contact_ids accumulated from explicit/prior IDs",
-                "page_size": plan.page_size,
-                "purpose": "resolve target contact IDs without writes",
-            },
-            {
-                "route": format!("/tools/v2{}", plan.kind.route()),
+                "route": format!("/tools/v2{}", plan.detail.kind.route()),
                 "payload": {"contact_ids": "up to chunk_size target IDs per request"},
-                "chunk_size": plan.chunk_size,
+                "chunk_size": plan.detail.chunk_size,
                 "concurrency": plan.concurrency,
-                "purpose": format!("{} selected target contacts; requires --yes outside dry-run", plan.kind.as_str()),
+                "purpose": format!("{} selected target contacts; requires --yes outside dry-run", plan.detail.kind.as_str()),
             }
         ],
         "actions": plan.actions.iter().map(contact_bulk_state_action_value).collect::<Vec<_>>(),
@@ -916,60 +892,56 @@ pub(crate) async fn apply_contact_bulk_state(
     runtime: &Runtime,
     plan: &ContactBulkStatePlan,
 ) -> Result<Value> {
-    let mut results = Vec::with_capacity(plan.actions.len());
-    let mut failures = 0_u64;
     let mut changed_count = 0_usize;
     let mut failed_target_count = 0_usize;
-    let outcomes = run_bulk_tool_calls(
+    let (results, failures) = collect_bulk_action_results(
         runtime,
         plan.actions.clone(),
         plan.concurrency,
-        &format!("joining {} write task", plan.command),
-        |action| (action.route, Value::Object(action.payload.clone())),
+        &format!("joining {} write task", plan.detail.command),
+        |action, result| {
+            let contact_ids = action
+                .payload
+                .get("contact_ids")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new()));
+            let target_count = contact_ids.as_array().map(Vec::len).unwrap_or_default();
+            match result {
+                Ok(data) => {
+                    changed_count = changed_count.saturating_add(target_count);
+                    json!({
+                        "row": action.row,
+                        "action": action.kind.as_str(),
+                        "contact_ids": contact_ids,
+                        "target_count": target_count,
+                        "route": format!("/tools/v2{}", action.route),
+                        "ok": true,
+                        "result_id": record_id(data),
+                        "result": data,
+                    })
+                }
+                Err(error) => {
+                    failed_target_count = failed_target_count.saturating_add(target_count);
+                    json!({
+                        "row": action.row,
+                        "action": action.kind.as_str(),
+                        "contact_ids": contact_ids,
+                        "target_count": target_count,
+                        "route": format!("/tools/v2{}", action.route),
+                        "ok": false,
+                        "error": error.to_string(),
+                    })
+                }
+            }
+        },
     )
     .await?;
-    for (action, result) in outcomes {
-        let contact_ids = action
-            .payload
-            .get("contact_ids")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new()));
-        let target_count = contact_ids.as_array().map(Vec::len).unwrap_or_default();
-        match result {
-            Ok(data) => {
-                changed_count = changed_count.saturating_add(target_count);
-                results.push(json!({
-                    "row": action.row,
-                    "action": action.kind.as_str(),
-                    "contact_ids": contact_ids,
-                    "target_count": target_count,
-                    "route": format!("/tools/v2{}", action.route),
-                    "ok": true,
-                    "result_id": record_id(&data),
-                    "result": data,
-                }));
-            }
-            Err(error) => {
-                failures = failures.saturating_add(1);
-                failed_target_count = failed_target_count.saturating_add(target_count);
-                results.push(json!({
-                    "row": action.row,
-                    "action": action.kind.as_str(),
-                    "contact_ids": contact_ids,
-                    "target_count": target_count,
-                    "route": format!("/tools/v2{}", action.route),
-                    "ok": false,
-                    "error": error.to_string(),
-                }));
-            }
-        }
-    }
     Ok(json!({
         "source": "live",
-        "action": plan.kind.as_str(),
-        "target_source": plan.target_source,
+        "action": plan.detail.kind.as_str(),
+        "target_source": plan.targets.target_source,
         "summary": {
-            "target_count": plan.target_ids.len(),
+            "target_count": plan.targets.target_ids.len(),
             "chunk_count": plan.actions.len(),
             "changed_count": changed_count,
             "failed_target_count": failed_target_count,
@@ -998,18 +970,7 @@ pub(crate) fn contact_bulk_state_action_value(action: &ContactApplyAction) -> Va
 }
 
 pub(crate) fn contact_bulk_state_rows(report: &Value) -> Value {
-    let rows = report
-        .get("results")
-        .or_else(|| report.get("actions"))
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(contact_bulk_state_row)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    Value::Array(rows)
+    contact_bulk_report_rows(report, contact_bulk_state_row)
 }
 
 pub(crate) fn contact_bulk_state_row(value: &Value) -> Option<Value> {
@@ -1041,77 +1002,30 @@ pub(crate) async fn contact_bulk_update_plan(
     runtime: &Runtime,
     options: &ContactBulkUpdateOptions,
 ) -> Result<ContactBulkUpdatePlan> {
-    let explicit_ids = options.target_ids.clone();
-    let mut target_ids = explicit_ids.clone();
-    if let Some(limit) = options.target_limit {
-        target_ids.truncate(limit);
-    }
-
-    let mut search_exported_count = None;
-    let mut search_match_count = None;
-    if let Some(search_payload) = &options.search_payload {
-        let remaining = options
-            .target_limit
-            .map(|limit| limit.saturating_sub(target_ids.len()));
-        if remaining != Some(0) {
-            let mut payload = search_payload.clone();
-            append_exclude_contact_ids(&mut payload, &target_ids)?;
-            let mut search_ids = Vec::new();
-            let (exported, total) = export_contacts_each_limited(
-                runtime,
-                payload,
-                options.page_size,
-                remaining,
-                |row| {
-                    let id = contact_id_from_value(&row)
-                        .ok_or_else(|| miette!("me.sh search row did not include numeric id"))?;
-                    search_ids.push(id);
-                    Ok(())
-                },
-            )
-            .await?;
-            search_exported_count = Some(exported);
-            search_match_count = Some(total);
-            target_ids.extend(search_ids);
-            target_ids = dedupe_ids(target_ids);
-            if let Some(limit) = options.target_limit {
-                target_ids.truncate(limit);
-            }
-        } else {
-            search_exported_count = Some(0);
-            search_match_count = Some(0);
-        }
-    }
-
-    if target_ids.is_empty() {
-        return err("contacts:bulk-update resolved zero target contacts");
-    }
-
-    let actions = target_ids
+    let targets = resolve_contact_bulk_targets(
+        runtime,
+        "contacts:bulk-update",
+        options.target_ids.clone(),
+        options.search_payload.as_ref(),
+        options.page_size,
+        options.target_limit,
+    )
+    .await?;
+    let actions = targets
+        .target_ids
         .iter()
         .enumerate()
         .map(|(index, id)| contact_bulk_update_action(index + 1, *id, &options.mutation_payload))
-        .collect::<Vec<_>>();
-    let target_source = match (explicit_ids.is_empty(), options.search_payload.is_some()) {
-        (false, true) => "explicit+search",
-        (false, false) => "explicit",
-        (true, true) => "search",
-        (true, false) => "none",
-    }
-    .to_string();
-
-    Ok(ContactBulkUpdatePlan {
-        target_source,
-        explicit_ids,
-        search_payload: options.search_payload.clone(),
-        search_exported_count,
-        search_match_count,
-        target_ids,
+        .collect();
+    Ok(ContactBulkPlan {
+        targets,
         actions,
-        mutation_payload: options.mutation_payload.clone(),
         page_size: options.page_size,
         target_limit: options.target_limit,
         concurrency: options.concurrency,
+        detail: ContactBulkUpdateDetail {
+            mutation_payload: options.mutation_payload.clone(),
+        },
     })
 }
 
@@ -1137,34 +1051,23 @@ pub(crate) fn contact_bulk_update_plan_value(plan: &ContactBulkUpdatePlan) -> Va
     json!({
         "source": "live",
         "action": "update",
-        "target_source": plan.target_source,
-        "filters": {
-            "contact_ids": plan.explicit_ids,
-            "from_search": plan.search_payload.is_some(),
-            "search_payload": plan.search_payload,
-            "target_limit": plan.target_limit,
-        },
-        "updates": plan.mutation_payload,
+        "target_source": plan.targets.target_source,
+        "filters": contact_bulk_filters_value(plan),
+        "updates": plan.detail.mutation_payload,
         "summary": {
-            "target_count": plan.target_ids.len(),
-            "explicit_count": plan.explicit_ids.len(),
-            "search_exported_count": plan.search_exported_count,
-            "search_match_count": plan.search_match_count,
+            "target_count": plan.targets.target_ids.len(),
+            "explicit_count": plan.targets.explicit_ids.len(),
+            "search_exported_count": plan.targets.search_exported_count,
+            "search_match_count": plan.targets.search_match_count,
             "write_required": !plan.actions.is_empty(),
         },
         "page_size": plan.page_size,
         "concurrency": plan.concurrency,
         "plan": [
-            {
-                "route": "/tools/v2/search",
-                "enabled": plan.search_payload.is_some(),
-                "payload": "same search filters with limit set to page_size and exclude_contact_ids accumulated from explicit/prior IDs",
-                "page_size": plan.page_size,
-                "purpose": "resolve target contact IDs without writes",
-            },
+            contact_bulk_search_step_value(plan, "resolve target contact IDs without writes"),
             {
                 "route": "/tools/v2/update-contact",
-                "payload": {"contact_id": "one target ID per request", "updates": plan.mutation_payload},
+                "payload": {"contact_id": "one target ID per request", "updates": plan.detail.mutation_payload},
                 "concurrency": plan.concurrency,
                 "purpose": "update selected target contacts; requires --yes outside dry-run",
             }
@@ -1177,60 +1080,52 @@ pub(crate) async fn apply_contact_bulk_update(
     runtime: &Runtime,
     plan: &ContactBulkUpdatePlan,
 ) -> Result<Value> {
-    let mut results = Vec::with_capacity(plan.actions.len());
-    let mut failures = 0_u64;
-    let outcomes = run_bulk_tool_calls(
+    let (results, failures) = collect_bulk_action_results(
         runtime,
         plan.actions.clone(),
         plan.concurrency,
         "joining contacts:bulk-update write task",
-        |action| (action.route, Value::Object(action.payload.clone())),
-    )
-    .await?;
-    for (action, result) in outcomes {
-        let contact_id = action
-            .payload
-            .get("contact_id")
-            .cloned()
-            .unwrap_or(Value::Null);
-        match result {
-            Ok(data) => {
-                results.push(json!({
+        |action, result| {
+            let contact_id = action
+                .payload
+                .get("contact_id")
+                .cloned()
+                .unwrap_or(Value::Null);
+            match result {
+                Ok(data) => json!({
                     "row": action.row,
                     "action": "update",
                     "contact_id": contact_id,
                     "route": format!("/tools/v2{}", action.route),
                     "ok": true,
-                    "updates": plan.mutation_payload,
-                    "result_id": record_id(&data),
+                    "updates": plan.detail.mutation_payload,
+                    "result_id": record_id(data),
                     "result": data,
-                }));
-            }
-            Err(error) => {
-                failures = failures.saturating_add(1);
-                results.push(json!({
+                }),
+                Err(error) => json!({
                     "row": action.row,
                     "action": "update",
                     "contact_id": contact_id,
                     "route": format!("/tools/v2{}", action.route),
                     "ok": false,
-                    "updates": plan.mutation_payload,
+                    "updates": plan.detail.mutation_payload,
                     "error": error.to_string(),
-                }));
+                }),
             }
-        }
-    }
+        },
+    )
+    .await?;
     Ok(json!({
         "source": "live",
         "action": "update",
-        "target_source": plan.target_source,
+        "target_source": plan.targets.target_source,
         "summary": {
-            "target_count": plan.target_ids.len(),
+            "target_count": plan.targets.target_ids.len(),
             "changed_count": results.len().saturating_sub(failures as usize),
             "failure_count": failures,
             "ok": failures == 0,
         },
-        "updates": plan.mutation_payload,
+        "updates": plan.detail.mutation_payload,
         "results": results,
     }))
 }
@@ -1246,18 +1141,7 @@ pub(crate) fn contact_bulk_update_action_value(action: &ContactApplyAction) -> V
 }
 
 pub(crate) fn contact_bulk_update_rows(report: &Value) -> Value {
-    let rows = report
-        .get("results")
-        .or_else(|| report.get("actions"))
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(contact_bulk_update_row)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    Value::Array(rows)
+    contact_bulk_report_rows(report, contact_bulk_update_row)
 }
 
 pub(crate) fn contact_bulk_update_row(value: &Value) -> Option<Value> {
