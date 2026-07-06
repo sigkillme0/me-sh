@@ -1404,14 +1404,20 @@ pub(crate) fn snapshot_history(options: SnapshotHistoryOptions) -> Result<Value>
     }))
 }
 
-pub(crate) fn snapshot_history_snapshots(
-    options: &SnapshotHistoryOptions,
+/// Shared discovery for `snapshot:history`, `snapshot:find`, and
+/// `snapshot:timeline`: walk `root` for snapshot directories, rank them by
+/// manifest time, and return them oldest-first alongside discovery errors.
+pub(crate) fn snapshot_discover_ranked_snapshots(
+    root: &Path,
+    recursive: bool,
+    max_depth: Option<usize>,
+    limit: Option<usize>,
 ) -> Result<(Vec<SnapshotHistorySnapshot>, Vec<Value>)> {
     let catalog_options = SnapshotCatalogOptions {
-        root: options.root.clone(),
-        recursive: options.recursive,
-        max_depth: options.max_depth,
-        limit: options.limit,
+        root: root.to_path_buf(),
+        recursive,
+        max_depth,
+        limit,
         include_snapshots: true,
         include_archives: false,
         verify: false,
@@ -1441,6 +1447,17 @@ pub(crate) fn snapshot_history_snapshots(
             .then_with(|| left.dir.cmp(&right.dir))
     });
     Ok((snapshots, discovery_errors))
+}
+
+pub(crate) fn snapshot_history_snapshots(
+    options: &SnapshotHistoryOptions,
+) -> Result<(Vec<SnapshotHistorySnapshot>, Vec<Value>)> {
+    snapshot_discover_ranked_snapshots(
+        &options.root,
+        options.recursive,
+        options.max_depth,
+        options.limit,
+    )
 }
 
 pub(crate) fn snapshot_history_snapshot(dir: PathBuf) -> Result<SnapshotHistorySnapshot> {
@@ -1760,40 +1777,12 @@ pub(crate) fn snapshot_find(options: SnapshotFindOptions) -> Result<Value> {
 pub(crate) fn snapshot_find_snapshots(
     options: &SnapshotFindOptions,
 ) -> Result<(Vec<SnapshotHistorySnapshot>, Vec<Value>)> {
-    let catalog_options = SnapshotCatalogOptions {
-        root: options.root.clone(),
-        recursive: options.recursive,
-        max_depth: options.max_depth,
-        limit: options.snapshot_limit,
-        include_snapshots: true,
-        include_archives: false,
-        verify: false,
-        doctor: false,
-        require_index: false,
-    };
-    let mut candidates = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut discovery_errors = Vec::new();
-    snapshot_catalog_discover(
-        &catalog_options.root,
-        0,
-        &catalog_options,
-        &mut seen,
-        &mut candidates,
-        &mut discovery_errors,
-    )?;
-    let mut snapshots = candidates
-        .into_iter()
-        .filter(|candidate| candidate.kind == SnapshotCatalogCandidateKind::Snapshot)
-        .map(|candidate| snapshot_history_snapshot(candidate.path))
-        .collect::<Result<Vec<_>>>()?;
-    snapshots.sort_by(|left, right| {
-        left.rank_time_unix_ms
-            .unwrap_or_default()
-            .cmp(&right.rank_time_unix_ms.unwrap_or_default())
-            .then_with(|| left.dir.cmp(&right.dir))
-    });
-    Ok((snapshots, discovery_errors))
+    snapshot_discover_ranked_snapshots(
+        &options.root,
+        options.recursive,
+        options.max_depth,
+        options.snapshot_limit,
+    )
 }
 
 pub(crate) fn snapshot_find_section(
@@ -2050,40 +2039,12 @@ pub(crate) fn snapshot_timeline(options: SnapshotTimelineOptions) -> Result<Valu
 pub(crate) fn snapshot_timeline_snapshots(
     options: &SnapshotTimelineOptions,
 ) -> Result<(Vec<SnapshotHistorySnapshot>, Vec<Value>)> {
-    let catalog_options = SnapshotCatalogOptions {
-        root: options.root.clone(),
-        recursive: options.recursive,
-        max_depth: options.max_depth,
-        limit: options.limit,
-        include_snapshots: true,
-        include_archives: false,
-        verify: false,
-        doctor: false,
-        require_index: false,
-    };
-    let mut candidates = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut discovery_errors = Vec::new();
-    snapshot_catalog_discover(
-        &catalog_options.root,
-        0,
-        &catalog_options,
-        &mut seen,
-        &mut candidates,
-        &mut discovery_errors,
-    )?;
-    let mut snapshots = candidates
-        .into_iter()
-        .filter(|candidate| candidate.kind == SnapshotCatalogCandidateKind::Snapshot)
-        .map(|candidate| snapshot_history_snapshot(candidate.path))
-        .collect::<Result<Vec<_>>>()?;
-    snapshots.sort_by(|left, right| {
-        left.rank_time_unix_ms
-            .unwrap_or_default()
-            .cmp(&right.rank_time_unix_ms.unwrap_or_default())
-            .then_with(|| left.dir.cmp(&right.dir))
-    });
-    Ok((snapshots, discovery_errors))
+    snapshot_discover_ranked_snapshots(
+        &options.root,
+        options.recursive,
+        options.max_depth,
+        options.limit,
+    )
 }
 
 pub(crate) fn snapshot_timeline_pair(
