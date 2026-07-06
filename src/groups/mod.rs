@@ -698,6 +698,30 @@ pub(crate) fn group_name_matches_query(group: &Value, query: &str) -> bool {
         .is_some_and(|name| name.contains(&query))
 }
 
+/// Shared --query/--group-ids/--all group selection predicate.
+///
+/// A `query` must match the group name (normalized, case-insensitive substring).
+/// With no selectors, selection requires `all` or a query; with selectors, the
+/// group must additionally match at least one selector.
+pub(crate) fn group_selection_matches(
+    group: &Value,
+    query: Option<&str>,
+    group_ids: &[GroupAuditSelector],
+    all: bool,
+) -> bool {
+    if let Some(query) = query
+        && !group_name_matches_query(group, query)
+    {
+        return false;
+    }
+    if group_ids.is_empty() {
+        return all || query.is_some();
+    }
+    group_ids
+        .iter()
+        .any(|selector| selector.matches_group(group))
+}
+
 pub(crate) fn compare_groups_by_name_then_id(left: &Value, right: &Value) -> std::cmp::Ordering {
     group_name(left)
         .unwrap_or_default()
@@ -868,6 +892,58 @@ mod tests {
         assert_eq!(counts.get("friends"), Some(&2));
         assert_eq!(counts.get("family"), Some(&1));
         assert!(!counts.contains_key(""));
+    }
+
+    #[test]
+    fn group_selection_matches_query_selectors_and_all() {
+        let group = json!({"id": "42", "name": "Sales   Team"});
+
+        // query alone: normalized case-insensitive substring, collapsed whitespace
+        assert!(group_selection_matches(
+            &group,
+            Some("sales team"),
+            &[],
+            false
+        ));
+        assert!(!group_selection_matches(&group, Some("family"), &[], false));
+
+        // no query, no selectors: only --all selects
+        assert!(group_selection_matches(&group, None, &[], true));
+        assert!(!group_selection_matches(&group, None, &[], false));
+
+        // selectors alone
+        assert!(group_selection_matches(
+            &group,
+            None,
+            &[GroupAuditSelector::Id(42)],
+            false
+        ));
+        assert!(!group_selection_matches(
+            &group,
+            None,
+            &[GroupAuditSelector::Id(7)],
+            false
+        ));
+
+        // query AND selectors must both match; --all does not bypass selectors
+        assert!(group_selection_matches(
+            &group,
+            Some("sales"),
+            &[GroupAuditSelector::Id(42)],
+            false
+        ));
+        assert!(!group_selection_matches(
+            &group,
+            Some("family"),
+            &[GroupAuditSelector::Id(42)],
+            false
+        ));
+        assert!(!group_selection_matches(
+            &group,
+            None,
+            &[GroupAuditSelector::Id(7)],
+            true
+        ));
     }
 
     #[test]

@@ -107,7 +107,14 @@ pub(crate) async fn groups_resolve(
     let discovered_count = groups.len();
     let mut selected = groups
         .into_iter()
-        .filter(|group| group_resolve_matches(group, options))
+        .filter(|group| {
+            group_selection_matches(
+                group,
+                options.query.as_deref(),
+                &options.group_ids,
+                options.all,
+            )
+        })
         .collect::<Vec<_>>();
     selected.sort_by(compare_groups_by_name_then_id);
 
@@ -169,21 +176,6 @@ pub(crate) async fn groups_resolve(
         },
         "candidates": candidates,
     }))
-}
-
-pub(crate) fn group_resolve_matches(group: &Value, options: &GroupResolveOptions) -> bool {
-    if let Some(query) = &options.query
-        && !group_name_matches_query(group, query)
-    {
-        return false;
-    }
-    if options.group_ids.is_empty() {
-        return options.all || options.query.is_some();
-    }
-    options
-        .group_ids
-        .iter()
-        .any(|selector| selector.matches_group(group))
 }
 
 pub(crate) fn group_resolve_candidate(
@@ -276,7 +268,14 @@ pub(crate) async fn groups_profile(
     let duplicate_name_counts = group_duplicate_name_counts(&groups);
     let mut selected = groups
         .into_iter()
-        .filter(|group| group_profile_matches(group, options))
+        .filter(|group| {
+            group_selection_matches(
+                group,
+                options.query.as_deref(),
+                &options.group_ids,
+                options.all,
+            )
+        })
         .collect::<Vec<_>>();
     selected.sort_by(compare_groups_by_name_then_id);
     let selected_count = selected.len();
@@ -358,21 +357,6 @@ pub(crate) async fn groups_profile(
         "groups": profiles,
         "errors": errors,
     }))
-}
-
-pub(crate) fn group_profile_matches(group: &Value, options: &GroupProfileOptions) -> bool {
-    if let Some(query) = &options.query
-        && !group_name_matches_query(group, query)
-    {
-        return false;
-    }
-    if options.group_ids.is_empty() {
-        return options.all || options.query.is_some();
-    }
-    options
-        .group_ids
-        .iter()
-        .any(|selector| selector.matches_group(group))
 }
 
 pub(crate) fn group_profile_filters(options: &GroupProfileOptions) -> Value {
@@ -502,7 +486,14 @@ pub(crate) async fn groups_overlap(
     let discovered_count = groups.len();
     let mut selected = groups
         .into_iter()
-        .filter(|group| group_overlap_matches(group, options))
+        .filter(|group| {
+            group_selection_matches(
+                group,
+                options.query.as_deref(),
+                &options.group_ids,
+                options.all,
+            )
+        })
         .collect::<Vec<_>>();
     selected.sort_by(compare_groups_by_name_then_id);
     let selected_count = selected.len();
@@ -734,21 +725,6 @@ pub(crate) fn group_overlap_pair(left: &GroupOverlapProfile, right: &GroupOverla
         "jaccard": number_value(jaccard).unwrap_or(Value::Null),
         "relationship": relationship,
     })
-}
-
-pub(crate) fn group_overlap_matches(group: &Value, options: &GroupOverlapOptions) -> bool {
-    if let Some(query) = &options.query
-        && !group_name_matches_query(group, query)
-    {
-        return false;
-    }
-    if options.group_ids.is_empty() {
-        return options.all || options.query.is_some();
-    }
-    options
-        .group_ids
-        .iter()
-        .any(|selector| selector.matches_group(group))
 }
 
 pub(crate) fn group_overlap_filters(options: &GroupOverlapOptions) -> Value {
@@ -1460,7 +1436,14 @@ pub(crate) async fn groups_members(
     let discovered_count = groups.len();
     let selected_groups = groups
         .into_iter()
-        .filter(|group| group_members_matches(group, &options))
+        .filter(|group| {
+            group_selection_matches(
+                group,
+                options.query.as_deref(),
+                &options.group_ids,
+                options.all_groups,
+            )
+        })
         .collect::<Vec<_>>();
     let selected_count = selected_groups.len();
     let (groups, errors) =
@@ -1505,21 +1488,6 @@ pub(crate) async fn groups_members(
         "groups": groups,
         "errors": errors,
     }))
-}
-
-pub(crate) fn group_members_matches(group: &Value, options: &GroupMembersOptions) -> bool {
-    if let Some(query) = &options.query
-        && !group_name_matches_query(group, query)
-    {
-        return false;
-    }
-    if options.group_ids.is_empty() {
-        return options.all_groups || options.query.is_some();
-    }
-    options
-        .group_ids
-        .iter()
-        .any(|selector| selector.matches_group(group))
 }
 
 pub(crate) async fn group_members_fetch_selected(
@@ -1686,7 +1654,14 @@ pub(crate) async fn group_bulk_membership_plan(
     let (_, groups, _) = groups_for_audit_live(runtime).await?;
     let mut selected_groups = groups
         .into_iter()
-        .filter(|group| group_bulk_membership_matches(group, options))
+        .filter(|group| {
+            group_selection_matches(
+                group,
+                options.query.as_deref(),
+                &options.target_group_ids,
+                options.all_groups,
+            )
+        })
         .collect::<Vec<_>>();
     selected_groups.sort_by(compare_groups_by_name_then_id);
 
@@ -1817,24 +1792,6 @@ pub(crate) async fn group_bulk_membership_plan(
         chunk_size: options.chunk_size,
         concurrency: options.concurrency,
     })
-}
-
-pub(crate) fn group_bulk_membership_matches(
-    group: &Value,
-    options: &GroupBulkMembershipOptions,
-) -> bool {
-    if let Some(query) = &options.query
-        && !group_name_matches_query(group, query)
-    {
-        return false;
-    }
-    if options.target_group_ids.is_empty() {
-        return options.all_groups || options.query.is_some();
-    }
-    options
-        .target_group_ids
-        .iter()
-        .any(|selector| selector.matches_group(group))
 }
 
 pub(crate) fn group_bulk_membership_group_ref(group: &Value) -> Result<(u64, String)> {
@@ -2126,24 +2083,6 @@ mod tests {
         assert_eq!(groups, vec![json!({"id":7,"name":"Nested"})]);
         assert!(!live_member_counts);
         Ok(())
-    }
-
-    #[test]
-    fn group_resolve_matches_collapsed_whitespace_query() {
-        let options = GroupResolveOptions {
-            query: Some("sales team".to_string()),
-            group_ids: Vec::new(),
-            all: false,
-            one: false,
-            candidate_limit: 10,
-            member_counts: false,
-            concurrency: 1,
-        };
-
-        assert!(group_resolve_matches(
-            &json!({"id": 1, "name": "Sales   Team"}),
-            &options
-        ));
     }
 
     #[test]
