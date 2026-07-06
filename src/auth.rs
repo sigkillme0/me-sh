@@ -161,10 +161,27 @@ pub(crate) fn html_escape(value: &str) -> String {
 }
 
 pub(crate) fn logout(runtime: &Runtime) -> Result<()> {
-    match fs::remove_file(&runtime.config_path) {
-        Ok(()) => println!("Logged out. Token removed."),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => println!("Already logged out."),
-        Err(error) => return Err(error).into_diagnostic().wrap_err("removing config"),
+    // Legacy configs must go too: `read_config` migrates them back on the
+    // next run, which used to silently resurrect a logged-out session.
+    let mut removed = Vec::new();
+    for path in std::iter::once(&runtime.config_path).chain(&runtime.legacy_config_paths) {
+        match fs::remove_file(path) {
+            Ok(()) => removed.push(path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .into_diagnostic()
+                    .wrap_err_with(|| format!("removing {}", path.display()));
+            }
+        }
+    }
+    if removed.is_empty() {
+        println!("Already logged out.");
+    } else {
+        println!("Logged out. Removed:");
+        for path in removed {
+            println!("  {}", path.display());
+        }
     }
     Ok(())
 }
@@ -247,6 +264,45 @@ mod tests {
         let error = code_from_url(&url).unwrap_err().to_string();
 
         assert!(error.contains("OAuth callback did not include code"));
+    }
+
+    #[test]
+    fn logout_removes_active_and_legacy_configs() -> Result<()> {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("meshx-auth-logout-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&dir).into_diagnostic()?;
+        let config_path = dir.join("mesh.json");
+        let runtime = Runtime {
+            http: HttpClient::new(),
+            config_path: config_path.clone(),
+            legacy_config_paths: legacy_config_paths_for(&config_path),
+            api_base: API_BASE.to_string(),
+            mcp_base: MCP_BASE.to_string(),
+            timeout: Duration::from_secs(5),
+            retries: 0,
+        };
+        for path in std::iter::once(&runtime.config_path).chain(&runtime.legacy_config_paths) {
+            fs::write(path, "{}").into_diagnostic()?;
+        }
+
+        logout(&runtime)?;
+
+        assert!(!runtime.config_path.exists());
+        for legacy in &runtime.legacy_config_paths {
+            assert!(
+                !legacy.exists(),
+                "legacy config {} must not survive logout",
+                legacy.display()
+            );
+        }
+        // With every token file gone, a fresh read cannot resurrect a login.
+        assert_eq!(runtime.read_config()?.map(|_| ()), None);
+        fs::remove_dir_all(&dir).into_diagnostic()?;
+        Ok(())
     }
 
     #[test]

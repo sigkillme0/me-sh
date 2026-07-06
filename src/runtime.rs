@@ -129,6 +129,11 @@ impl Runtime {
         for path in &self.legacy_config_paths {
             if let Some(config) = read_config_file(path)? {
                 self.write_config(&config)?;
+                // The migrated config now owns the tokens; remove the legacy
+                // plaintext copy so it cannot linger or resurrect a logout.
+                if let Err(error) = fs::remove_file(path) {
+                    warn!(%error, path = %path.display(), "could not remove migrated legacy config");
+                }
                 return Ok(Some(config));
             }
         }
@@ -461,5 +466,67 @@ mod tests {
         assert!(tool_route_url_path("/tools/v2").is_err());
         assert!(tool_route_url_path("/").is_err());
         assert!(tool_route_url_path("").is_err());
+    }
+
+    fn temp_config_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "meshx-runtime-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_runtime(config_path: PathBuf) -> Runtime {
+        let legacy_config_paths = legacy_config_paths_for(&config_path);
+        Runtime {
+            http: HttpClient::new(),
+            config_path,
+            legacy_config_paths,
+            api_base: API_BASE.to_string(),
+            mcp_base: MCP_BASE.to_string(),
+            timeout: Duration::from_secs(5),
+            retries: 0,
+        }
+    }
+
+    fn auth_tokens(expires_at: u64) -> AuthTokens {
+        AuthTokens {
+            access_token: "access-token-value".to_string(),
+            refresh_token: "refresh-token-value".to_string(),
+            expires_in: 3600,
+            expires_at,
+            token_type: Some("Bearer".to_string()),
+            scope: Some("read write".to_string()),
+        }
+    }
+
+    #[test]
+    fn read_config_migrates_legacy_config_and_removes_the_source() {
+        let dir = temp_config_dir("legacy-migration");
+        let runtime = test_runtime(dir.join("mesh.json"));
+        let legacy_path = &runtime.legacy_config_paths[0];
+        let config = MeshConfig {
+            auth: Some(auth_tokens(u64::MAX)),
+            user: None,
+        };
+        fs::write(legacy_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+        let migrated = runtime.read_config().unwrap().expect("config migrates");
+
+        assert_eq!(
+            migrated.auth.map(|auth| auth.access_token),
+            Some("access-token-value".to_string())
+        );
+        assert!(runtime.config_path.exists(), "new config file is written");
+        assert!(
+            !legacy_path.exists(),
+            "legacy plaintext token file is removed after migration"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
