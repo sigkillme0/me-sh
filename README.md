@@ -78,6 +78,7 @@ mesh groups:compare --left-query investors --right-group-id starred --format tab
 mesh snapshot:create --dir before-edit
 mesh snapshot:verify --dir before-edit
 mesh snapshot:diff --old before-edit --new after-edit --details
+mesh snapshot:index --dir before-edit
 mesh snapshot:pack --dir before-edit --archive before-edit.tar.zst
 mesh snapshot:verify-archive --archive before-edit.tar.zst --require-index
 ```
