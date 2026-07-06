@@ -119,61 +119,116 @@ pub(crate) fn restore_action_from_contact(
     })
 }
 
+/// Apply every restore action, collecting per-row ok/error results instead of
+/// aborting on the first API failure: earlier rows are already written to
+/// me.sh, so the report must say exactly which contacts were applied and which
+/// failed. Mirrors [`apply_group_actions`]; the caller fails the process via
+/// `write_checked` when `ok` is false.
 pub(crate) async fn apply_snapshot_restore(
     runtime: &Runtime,
     mode: RestoreMode,
     include_notes: bool,
     actions: Vec<RestoreAction>,
-) -> Result<Value> {
+) -> Value {
     let mut results = Vec::with_capacity(actions.len());
-    for action in actions {
-        let data = runtime
-            .call_tool(action.route, Value::Object(action.payload.clone()))
-            .await
-            .wrap_err_with(|| format!("restoring contact {}", action.source_id))?;
-        let target_id = if matches!(mode, RestoreMode::Update) {
-            action.source_id
-        } else {
-            record_id(&data)
-                .and_then(|id| id.parse::<u64>().ok())
-                .ok_or_else(|| {
-                    miette!("created contact for {} did not return id", action.source_id)
-                })?
-        };
-        let mut note_results = Vec::with_capacity(action.notes.len());
-        for note in &action.notes {
-            let mut note_payload = note.clone();
-            note_payload.insert(
-                "contact_id".to_string(),
-                Value::Number(Number::from(target_id)),
-            );
-            let note_result = runtime
-                .call_tool(route::NOTE, Value::Object(note_payload))
-                .await
-                .wrap_err_with(|| format!("restoring note for contact {}", action.source_id))?;
-            note_results.push(note_result);
+    let mut failures = 0_u64;
+    for action in &actions {
+        let row = apply_restore_action(runtime, mode, action).await;
+        if !row.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            failures = failures.saturating_add(1);
         }
-        results.push(json!({
-            "source_id": action.source_id,
-            "target_id": target_id,
-            "route": format!("/tools/v2{}", action.route),
-            "result_id": record_id(&data),
-            "result": data,
-            "notes_created": note_results.len(),
-            "note_results": note_results,
-        }));
+        results.push(row);
     }
     let notes_created = results
         .iter()
         .filter_map(|result| result.get("notes_created").and_then(Value::as_u64))
         .sum::<u64>();
-    Ok(json!({
+    json!({
+        "ok": failures == 0,
         "mode": mode.as_str(),
         "include_notes": include_notes,
-        "changed_count": results.len(),
+        "changed_count": results.len().saturating_sub(failures as usize),
+        "failure_count": failures,
         "notes_created": notes_created,
         "results": results,
-    }))
+    })
+}
+
+async fn apply_restore_action(
+    runtime: &Runtime,
+    mode: RestoreMode,
+    action: &RestoreAction,
+) -> Value {
+    let route = format!("/tools/v2{}", action.route);
+    let data = match runtime
+        .call_tool(action.route, Value::Object(action.payload.clone()))
+        .await
+    {
+        Ok(data) => data,
+        Err(error) => {
+            return json!({
+                "source_id": action.source_id,
+                "route": route,
+                "ok": false,
+                "error": format!("restoring contact {}: {error}", action.source_id),
+            });
+        }
+    };
+    let target_id = if matches!(mode, RestoreMode::Update) {
+        action.source_id
+    } else {
+        match record_id(&data).and_then(|id| id.parse::<u64>().ok()) {
+            Some(id) => id,
+            None => {
+                return json!({
+                    "source_id": action.source_id,
+                    "route": route,
+                    "ok": false,
+                    "error": format!("created contact for {} did not return id", action.source_id),
+                    "result_id": record_id(&data),
+                    "result": data,
+                });
+            }
+        }
+    };
+    let mut note_results = Vec::with_capacity(action.notes.len());
+    let mut note_error = None;
+    for note in &action.notes {
+        let mut note_payload = note.clone();
+        note_payload.insert(
+            "contact_id".to_string(),
+            Value::Number(Number::from(target_id)),
+        );
+        match runtime
+            .call_tool(route::NOTE, Value::Object(note_payload))
+            .await
+        {
+            Ok(note_result) => note_results.push(note_result),
+            Err(error) => {
+                // Stop restoring this contact's remaining notes; the row is
+                // reported as failed and the loop moves to the next contact.
+                note_error = Some(format!(
+                    "restoring note for contact {}: {error}",
+                    action.source_id
+                ));
+                break;
+            }
+        }
+    }
+    let mut row = json!({
+        "source_id": action.source_id,
+        "target_id": target_id,
+        "route": route,
+        "ok": note_error.is_none(),
+        "result_id": record_id(&data),
+        "result": data,
+        "notes_created": note_results.len(),
+        "note_results": note_results,
+    });
+    if let Some(error) = note_error {
+        row["error"] = Value::String(error);
+    }
+    row
 }
 
 pub(crate) fn restore_payload_from_contact(contact: &Value) -> Result<Map<String, Value>> {
@@ -416,6 +471,64 @@ mod tests {
 
         fs::remove_dir_all(&dir).ok();
         assert!(error.to_string().contains("duplicate record ID 1"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn apply_snapshot_restore_collects_failures_and_continues() -> Result<()> {
+        let dir = temp_restore_dir("apply-failures");
+        fs::create_dir_all(&dir).into_diagnostic()?;
+        let runtime = Runtime {
+            http: HttpClient::new(),
+            config_path: dir.join("missing-config.json"),
+            legacy_config_paths: Vec::new(),
+            api_base: "http://127.0.0.1:1".to_string(),
+            mcp_base: "http://127.0.0.1:1".to_string(),
+            timeout: Duration::from_millis(250),
+            retries: 0,
+            refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let actions = vec![
+            restore_action_from_contact(
+                &json!({"id": 1, "name": "Ada Lovelace"}),
+                RestoreMode::Update,
+                false,
+            )?,
+            restore_action_from_contact(
+                &json!({"id": 2, "name": "Grace Hopper"}),
+                RestoreMode::Update,
+                false,
+            )?,
+        ];
+
+        let result = apply_snapshot_restore(&runtime, RestoreMode::Update, false, actions).await;
+
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(result.get("ok"), Some(&json!(false)));
+        assert_eq!(result.get("changed_count"), Some(&json!(0)));
+        assert_eq!(result.get("failure_count"), Some(&json!(2)));
+        let results = result
+            .get("results")
+            .and_then(Value::as_array)
+            .expect("results array");
+        assert_eq!(results.len(), 2);
+        assert!(
+            results
+                .iter()
+                .all(|row| row.get("ok") == Some(&json!(false)))
+        );
+        assert!(
+            results[0]
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| error.contains("restoring contact 1"))
+        );
+        assert!(
+            results[1]
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| error.contains("restoring contact 2"))
+        );
         Ok(())
     }
 

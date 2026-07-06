@@ -639,8 +639,12 @@ async fn run_snapshot(matches: ArgMatches, runtime: Runtime) -> Result<()> {
                     "snapshot:restore writes contacts. Re-run with --yes, or use --dry-run.",
                 );
             }
-            let result = apply_snapshot_restore(&runtime, mode, include_notes, actions).await?;
-            write_value(&matches, result)
+            let result = apply_snapshot_restore(&runtime, mode, include_notes, actions).await;
+            write_checked(
+                &matches,
+                result,
+                "snapshot:restore: one or more contacts failed to restore",
+            )
         }
         _ => run_spec_command(name, sub, &matches, &runtime).await,
     }
