@@ -86,14 +86,21 @@ pub(crate) async fn oauth_code_from_listener(listener: TcpListener) -> Result<St
 pub(crate) async fn oauth_code_from_stdin() -> Result<String> {
     let mut line = String::new();
     let mut reader = BufReader::new(tokio::io::stdin());
-    reader
+    let read = reader
         .read_line(&mut line)
         .await
         .into_diagnostic()
         .wrap_err("reading OAuth callback from stdin")?;
+    if read == 0 {
+        // stdin EOF (e.g. `mesh login </dev/null` or a non-interactive shell):
+        // never resolve this branch, so the select! in `login` keeps the
+        // loopback listener alive for the browser callback.
+        debug!("stdin closed; waiting on the browser callback listener");
+        return std::future::pending().await;
+    }
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return err("stdin closed before a callback URL or code was pasted");
+        return err("no callback URL or code was pasted");
     }
     code_from_callback_text(trimmed)
 }
