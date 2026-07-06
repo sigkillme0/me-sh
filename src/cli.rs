@@ -241,6 +241,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("dir")
                         .long("dir")
+                        .visible_alias("snapshot-dir")
                         .help("Snapshot output directory. Defaults to ./mesh-snapshot-<unix-ms>.")
                         .value_hint(ValueHint::DirPath),
                 )
@@ -311,6 +312,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("dir")
                         .long("dir")
+                        .visible_alias("snapshot-dir")
                         .required(true)
                         .help("Snapshot directory.")
                         .value_hint(ValueHint::DirPath),
@@ -699,6 +701,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("dir")
                         .long("dir")
+                        .visible_alias("snapshot-dir")
                         .required(true)
                         .help("Snapshot directory to compare against live me.sh.")
                         .value_hint(ValueHint::DirPath),
@@ -752,6 +755,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("dir")
                         .long("dir")
+                        .visible_alias("snapshot-dir")
                         .required(true)
                         .help("Snapshot directory to report on.")
                         .value_hint(ValueHint::DirPath),
@@ -889,6 +893,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("dir")
                         .long("dir")
+                        .visible_alias("snapshot-dir")
                         .required(true)
                         .help("Snapshot directory.")
                         .value_hint(ValueHint::DirPath),
@@ -912,6 +917,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("dir")
                         .long("dir")
+                        .visible_alias("snapshot-dir")
                         .required(true)
                         .help("Snapshot directory.")
                         .value_hint(ValueHint::DirPath),
@@ -941,6 +947,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("dir")
                         .long("dir")
+                        .visible_alias("snapshot-dir")
                         .required(true)
                         .help("Snapshot directory.")
                         .value_hint(ValueHint::DirPath),
@@ -990,6 +997,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("dir")
                         .long("dir")
+                        .visible_alias("snapshot-dir")
                         .required(true)
                         .help("Destination snapshot directory.")
                         .value_hint(ValueHint::DirPath),
@@ -1013,6 +1021,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("dir")
                         .long("dir")
+                        .visible_alias("snapshot-dir")
                         .required(true)
                         .help("Snapshot directory.")
                         .value_hint(ValueHint::DirPath),
@@ -1052,6 +1061,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("dir")
                         .long("dir")
+                        .visible_alias("snapshot-dir")
                         .required(true)
                         .help("Snapshot directory.")
                         .value_hint(ValueHint::DirPath),
@@ -1116,6 +1126,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("dir")
                         .long("dir")
+                        .visible_alias("snapshot-dir")
                         .required(true)
                         .help("Snapshot directory.")
                         .value_hint(ValueHint::DirPath),
@@ -1480,6 +1491,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("snapshot-dir")
                         .long("snapshot-dir")
+                        .visible_alias("dir")
                         .help("Read moment rows from a verified local snapshot instead of live me.sh.")
                         .value_hint(ValueHint::DirPath),
                 )
@@ -1691,6 +1703,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("snapshot-dir")
                         .long("snapshot-dir")
+                        .visible_alias("dir")
                     .help("Snapshot directory to analyze instead of live me.sh.")
                         .value_hint(ValueHint::DirPath),
                 )
@@ -1736,6 +1749,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("snapshot-dir")
                         .long("snapshot-dir")
+                        .visible_alias("dir")
                     .help("Snapshot directory to audit instead of live me.sh.")
                         .value_hint(ValueHint::DirPath),
                 )
@@ -1774,6 +1788,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("snapshot-dir")
                         .long("snapshot-dir")
+                        .visible_alias("dir")
                     .help("Snapshot directory to analyze instead of live me.sh.")
                         .value_hint(ValueHint::DirPath),
                 )
@@ -1836,6 +1851,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("snapshot-dir")
                         .long("snapshot-dir")
+                        .visible_alias("dir")
                     .help("Snapshot directory to analyze instead of live me.sh.")
                         .value_hint(ValueHint::DirPath),
                 )
@@ -1910,6 +1926,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("snapshot-dir")
                         .long("snapshot-dir")
+                        .visible_alias("dir")
                     .help("Snapshot directory to analyze instead of live me.sh.")
                         .value_hint(ValueHint::DirPath),
                 )
@@ -1997,6 +2014,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("snapshot-dir")
                         .long("snapshot-dir")
+                        .visible_alias("dir")
                         .help("Read contacts from a verified snapshot instead of live search.")
                         .value_hint(ValueHint::DirPath),
                 )
@@ -2077,6 +2095,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("snapshot-dir")
                         .long("snapshot-dir")
+                        .visible_alias("dir")
                         .help("Read contacts from a verified snapshot instead of live search.")
                         .value_hint(ValueHint::DirPath),
                 )
@@ -2516,6 +2535,7 @@ pub(crate) fn build_cli() -> Command {
                 .arg(
                     Arg::new("snapshot-dir")
                         .long("snapshot-dir")
+                        .visible_alias("dir")
                     .help("Snapshot directory to audit instead of live me.sh.")
                         .value_hint(ValueHint::DirPath),
                 )
@@ -3048,4 +3068,106 @@ fn arg_from_option(option: &OptionSpec) -> Arg {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_cli;
+    use clap::ArgMatches;
+
+    fn parse(argv: &[&str]) -> ArgMatches {
+        build_cli()
+            .try_get_matches_from(argv)
+            .expect("argv should parse")
+    }
+
+    fn sub<'a>(matches: &'a ArgMatches, name: &str) -> &'a ArgMatches {
+        let (sub_name, sub_matches) = matches.subcommand().expect("subcommand present");
+        assert_eq!(sub_name, name);
+        sub_matches
+    }
+
+    #[test]
+    fn snapshot_dir_analysis_args_accept_dir_alias() {
+        // Analysis-family commands: canonical id stays "snapshot-dir" for both spellings.
+        for command in [
+            "contacts:dedupe",
+            "contacts:quality",
+            "contacts:facets",
+            "contacts:pivot",
+            "contacts:overview",
+            "contacts:map",
+            "contacts:reconnect",
+            "groups:audit",
+            "moments:timeline",
+        ] {
+            for flag in ["--snapshot-dir", "--dir"] {
+                let matches = parse(&["mesh", command, flag, "/tmp/snap"]);
+                let sub = sub(&matches, command);
+                assert_eq!(
+                    sub.get_one::<String>("snapshot-dir").map(String::as_str),
+                    Some("/tmp/snap"),
+                    "{command} {flag} should populate the snapshot-dir id",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_family_dir_args_accept_snapshot_dir_alias() {
+        // snapshot:* commands: canonical id stays "dir" for both spellings.
+        for command in [
+            "snapshot:create",
+            "snapshot:verify",
+            "snapshot:drift",
+            "snapshot:report",
+            "snapshot:stats",
+            "snapshot:doctor",
+            "snapshot:index",
+            "snapshot:query",
+            "snapshot:restore",
+        ] {
+            for flag in ["--dir", "--snapshot-dir"] {
+                let matches = parse(&["mesh", command, flag, "/tmp/snap"]);
+                let sub = sub(&matches, command);
+                assert_eq!(
+                    sub.get_one::<String>("dir").map(String::as_str),
+                    Some("/tmp/snap"),
+                    "{command} {flag} should populate the dir id",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_pack_and_unpack_dir_accept_snapshot_dir_alias() {
+        let matches = parse(&[
+            "mesh",
+            "snapshot:pack",
+            "--snapshot-dir",
+            "/tmp/snap",
+            "--archive",
+            "/tmp/snap.tar.zst",
+        ]);
+        let pack = sub(&matches, "snapshot:pack");
+        assert_eq!(
+            pack.get_one::<String>("dir").map(String::as_str),
+            Some("/tmp/snap"),
+        );
+
+        let matches = parse(&[
+            "mesh",
+            "snapshot:unpack",
+            "--archive",
+            "/tmp/snap.tar.zst",
+            "--snapshot-dir",
+            "/tmp/snap",
+        ]);
+        let unpack = sub(&matches, "snapshot:unpack");
+        assert_eq!(
+            unpack.get_one::<String>("dir").map(String::as_str),
+            Some("/tmp/snap"),
+        );
+    }
+
 }
