@@ -149,19 +149,7 @@ impl Runtime {
         let content = serde_json::to_string_pretty(config)
             .into_diagnostic()
             .wrap_err("serializing me.sh config")?;
-        fs::write(&self.config_path, content)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("writing {}", self.config_path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.config_path, fs::Permissions::from_mode(0o600))
-                .into_diagnostic()
-                .wrap_err_with(|| {
-                    format!("setting permissions on {}", self.config_path.display())
-                })?;
-        }
-        Ok(())
+        write_secret_file(&self.config_path, &content)
     }
 
     pub(crate) async fn access_token(&self) -> Result<String> {
@@ -436,6 +424,53 @@ pub(crate) async fn run_bulk_tool_calls<A>(
     Ok(outcomes)
 }
 
+/// Write `content` to `path` so no other user can ever read the tokens: on
+/// unix the bytes go into a same-directory temp file created with mode 0o600,
+/// which is then renamed over the target. This closes the window where the
+/// old `fs::write` + chmod sequence left the file world-readable, and makes
+/// the update atomic for concurrent readers. Non-unix keeps plain `fs::write`.
+pub(crate) fn write_secret_file(path: &Path, content: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("mesh-config");
+        let temp_path = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+        let result = (|| -> io::Result<()> {
+            // A stale temp file can only be our own (same path + pid) crash
+            // leftover; clear it so `create_new` below cannot get stuck.
+            match fs::remove_file(&temp_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp_path)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temp_path, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        result
+            .into_diagnostic()
+            .wrap_err_with(|| format!("writing {}", path.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, content)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("writing {}", path.display()))
+    }
+}
+
 pub(crate) fn total_from_search_usize(data: &Value) -> Result<usize> {
     let Some(total) = data
         .get("total")
@@ -503,6 +538,30 @@ mod tests {
             token_type: Some("Bearer".to_string()),
             scope: Some("read write".to_string()),
         }
+    }
+
+    #[test]
+    fn write_secret_file_writes_owner_only_without_leftovers() {
+        let dir = temp_config_dir("secret-file");
+        let path = dir.join("mesh.json");
+
+        write_secret_file(&path, "{\"first\":true}").unwrap();
+        write_secret_file(&path, "{\"second\":true}").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"second\":true}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "token file must be owner-only");
+        }
+        let leftovers = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "mesh.json")
+            .collect::<Vec<_>>();
+        assert_eq!(leftovers, Vec::<String>::new());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
