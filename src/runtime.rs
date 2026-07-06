@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Runtime {
@@ -238,13 +238,18 @@ impl Runtime {
     pub(crate) async fn call_tool(&self, route: &str, payload: Value) -> Result<Value> {
         let token = self.access_token().await?;
         let route = tool_route_url_path(route)?;
+        let policy = if tool_route_is_destructive(&route) {
+            RetryPolicy::NonIdempotent
+        } else {
+            RetryPolicy::Idempotent
+        };
         let url = join_url(&self.mcp_base, &route)?;
         let body = if payload.is_object() {
             payload
         } else {
             json!({})
         };
-        self.request_json_with_retry(Method::POST, url, Some(token), Some(body), None)
+        self.request_json_with_retry(Method::POST, url, Some(token), Some(body), None, policy)
             .await
     }
 
@@ -264,7 +269,7 @@ impl Runtime {
         form: Option<&[(&str, &str)]>,
     ) -> Result<Value> {
         let url = join_url(&self.api_base, path)?;
-        self.request_json_with_retry(method, url, token, None, form)
+        self.request_json_with_retry(method, url, token, None, form, RetryPolicy::Idempotent)
             .await
     }
 
@@ -275,6 +280,7 @@ impl Runtime {
         token: Option<String>,
         json_body: Option<Value>,
         form: Option<&[(&str, &str)]>,
+        policy: RetryPolicy,
     ) -> Result<Value> {
         let mut attempt = 0;
         loop {
@@ -289,8 +295,8 @@ impl Runtime {
                 .await;
             match result {
                 Ok(value) => return Ok(value),
-                Err(error) if should_retry(&error, attempt, self.retries) => {
-                    let delay = Duration::from_millis(250 * 2_u64.pow(attempt));
+                Err(error) if should_retry(&error, attempt, self.retries, policy) => {
+                    let delay = retry_delay(&error, attempt);
                     warn!(%error, attempt, ?delay, "transient me.sh request failed; retrying");
                     sleep(delay).await;
                     attempt += 1;
@@ -321,6 +327,7 @@ impl Runtime {
         }
         let response = request.send().await.map_err(RequestError::Transport)?;
         let status = response.status();
+        let retry_after = retry_after_from_headers(response.headers());
         let text = response.text().await.map_err(RequestError::Transport)?;
         let parsed = parse_maybe_json(&text);
         if !status.is_success() {
@@ -328,6 +335,7 @@ impl Runtime {
                 status,
                 url,
                 body: parsed,
+                retry_after,
             });
         }
         Ok(parsed)
@@ -440,6 +448,27 @@ pub(crate) async fn run_bulk_tool_calls<A>(
         }
     }
     Ok(outcomes)
+}
+
+/// Whether a tool route writes me.sh data. Backed by the same
+/// `command_spec` `destructive` catalog that drives plan_audit's write/read
+/// classification, so there is a single source of truth. Accepts bare
+/// (`search`), slash (`/search`), and full (`/tools/v2/search`) route forms.
+/// Routes not in the catalog (and malformed routes) are treated as writes so
+/// an unknown route is never blind-retried after it may have committed.
+pub(crate) fn tool_route_is_destructive(route: &str) -> bool {
+    static CATALOG: OnceLock<BTreeMap<String, bool>> = OnceLock::new();
+    let Ok(full) = tool_route_url_path(route) else {
+        return true;
+    };
+    let Some(route_path) = full.strip_prefix("/tools/v2") else {
+        return true;
+    };
+    CATALOG
+        .get_or_init(plan_audit_route_catalog)
+        .get(route_path)
+        .copied()
+        .unwrap_or(true)
 }
 
 /// Write `content` to `path` so no other user can ever read the tokens: on
@@ -557,6 +586,27 @@ mod tests {
             token_type: Some("Bearer".to_string()),
             scope: Some("read write".to_string()),
         }
+    }
+
+    #[test]
+    fn tool_route_is_destructive_follows_the_command_spec_catalog() {
+        assert!(!tool_route_is_destructive("search"));
+        assert!(!tool_route_is_destructive("/search"));
+        assert!(!tool_route_is_destructive("/tools/v2/search"));
+        assert!(!tool_route_is_destructive("/get-contact"));
+        assert!(!tool_route_is_destructive("/get-groups"));
+
+        assert!(tool_route_is_destructive("/create-contact"));
+        assert!(tool_route_is_destructive("/note"));
+        assert!(tool_route_is_destructive("/update-group"));
+        assert!(tool_route_is_destructive("/merge-contacts"));
+    }
+
+    #[test]
+    fn tool_route_is_destructive_treats_unknown_and_malformed_routes_as_writes() {
+        assert!(tool_route_is_destructive("/definitely-not-a-route"));
+        assert!(tool_route_is_destructive(""));
+        assert!(tool_route_is_destructive("/tools/v1/search"));
     }
 
     #[test]
