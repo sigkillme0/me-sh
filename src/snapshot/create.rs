@@ -13,8 +13,94 @@ pub(crate) async fn create_snapshot(
     force: bool,
     options: SnapshotCreateOptions,
 ) -> Result<Value> {
-    prepare_snapshot_dir(dir, force)?;
+    check_snapshot_create_target(dir, force)?;
+    let temp_dir = create_snapshot_temp_dir(dir)?;
+    let result = match build_snapshot(runtime, &temp_dir, options).await {
+        Ok(manifest) => commit_snapshot_dir(&temp_dir, dir).map(|()| manifest),
+        Err(error) => Err(error),
+    };
+    if result.is_err() {
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+    result
+}
 
+/// Same acceptance rules as [`prepare_snapshot_dir`], but without creating the
+/// target directory: the snapshot is built in a temp sibling and renamed into
+/// place, so a crash mid-create never leaves a manifest-less final directory.
+pub(crate) fn check_snapshot_create_target(dir: &Path, force: bool) -> Result<()> {
+    if dir.exists() {
+        if !force {
+            return err(format!(
+                "{} already exists. Use --force only for an existing empty directory.",
+                dir.display()
+            ));
+        }
+        let mut entries = fs::read_dir(dir)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("reading {}", dir.display()))?;
+        if entries.next().transpose().into_diagnostic()?.is_some() {
+            return err(format!("{} exists and is not empty", dir.display()));
+        }
+    } else if let Some(parent) = dir.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("creating {}", parent.display()))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn create_snapshot_temp_dir(dir: &Path) -> Result<PathBuf> {
+    for attempt in 0..100 {
+        let path = snapshot_temp_dir_path(dir, attempt);
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .into_diagnostic()
+                    .wrap_err_with(|| format!("creating {}", path.display()));
+            }
+        }
+    }
+    err("could not create a unique snapshot temp directory")
+}
+
+pub(crate) fn snapshot_temp_dir_path(dir: &Path, attempt: u32) -> PathBuf {
+    let name = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "snapshot".to_string());
+    let temp_name = format!(
+        ".{name}.meshx-snapshot-tmp-{}-{}-{attempt}",
+        std::process::id(),
+        unix_millis()
+    );
+    match dir.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        Some(parent) => parent.join(temp_name),
+        None => PathBuf::from(temp_name),
+    }
+}
+
+pub(crate) fn commit_snapshot_dir(temp_dir: &Path, dir: &Path) -> Result<()> {
+    if dir.exists() {
+        // check_snapshot_create_target only accepts an existing dir when it is
+        // empty (--force); remove_dir refuses non-empty dirs, so this cannot
+        // discard data racing in after the check.
+        fs::remove_dir(dir)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("replacing {}", dir.display()))?;
+    }
+    fs::rename(temp_dir, dir)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("moving {} to {}", temp_dir.display(), dir.display()))
+}
+
+pub(crate) async fn build_snapshot(
+    runtime: &Runtime,
+    dir: &Path,
+    options: SnapshotCreateOptions,
+) -> Result<Value> {
     let (contacts_file, contact_ids, total) = write_snapshot_contacts(runtime, dir)
         .await
         .wrap_err("fetching contacts for snapshot")?;
@@ -681,6 +767,130 @@ pub(crate) fn snapshot_moment_fingerprint_diffs(old_dir: &Path, new_dir: &Path) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_create_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "meshx-create-{label}-{}-{}",
+            std::process::id(),
+            NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn dir_entry_names(dir: &Path) -> Result<Vec<String>> {
+        let mut names = fs::read_dir(dir)
+            .into_diagnostic()?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .into_diagnostic()?;
+        names.sort();
+        Ok(names)
+    }
+
+    fn unreachable_runtime(root: &Path) -> Runtime {
+        Runtime {
+            http: HttpClient::new(),
+            config_path: root.join("missing-config.json"),
+            legacy_config_paths: Vec::new(),
+            api_base: "http://127.0.0.1:1".to_string(),
+            mcp_base: "http://127.0.0.1:1".to_string(),
+            timeout: Duration::from_millis(250),
+            retries: 0,
+            refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    fn no_moments_options() -> SnapshotCreateOptions {
+        SnapshotCreateOptions {
+            full_contacts: false,
+            full_contact_ids: Vec::new(),
+            full_limit: None,
+            full_concurrency: 4,
+            moments: false,
+            moments_start: None,
+            moments_end: None,
+            moments_contact_ids: Vec::new(),
+            moments_limit: 75,
+        }
+    }
+
+    #[test]
+    fn commit_snapshot_dir_renames_temp_into_place() -> Result<()> {
+        let root = temp_create_root("commit");
+        fs::create_dir_all(&root).into_diagnostic()?;
+        let dir = root.join("snap");
+
+        check_snapshot_create_target(&dir, false)?;
+        let temp_dir = create_snapshot_temp_dir(&dir)?;
+        fs::write(temp_dir.join("manifest.json"), b"{}").into_diagnostic()?;
+        commit_snapshot_dir(&temp_dir, &dir)?;
+
+        assert!(dir.join("manifest.json").is_file());
+        assert!(!temp_dir.exists());
+        assert_eq!(dir_entry_names(&root)?, vec!["snap".to_string()]);
+        fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn commit_snapshot_dir_replaces_existing_empty_dir_with_force() -> Result<()> {
+        let root = temp_create_root("commit-force");
+        let dir = root.join("snap");
+        fs::create_dir_all(&dir).into_diagnostic()?;
+
+        check_snapshot_create_target(&dir, true)?;
+        let temp_dir = create_snapshot_temp_dir(&dir)?;
+        fs::write(temp_dir.join("manifest.json"), b"{}").into_diagnostic()?;
+        commit_snapshot_dir(&temp_dir, &dir)?;
+
+        assert!(dir.join("manifest.json").is_file());
+        assert!(!temp_dir.exists());
+        assert_eq!(dir_entry_names(&root)?, vec!["snap".to_string()]);
+        fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn check_snapshot_create_target_keeps_prepare_snapshot_dir_semantics() -> Result<()> {
+        let root = temp_create_root("check-target");
+        let dir = root.join("snap");
+        fs::create_dir_all(&dir).into_diagnostic()?;
+        fs::write(dir.join("existing.txt"), b"data").into_diagnostic()?;
+
+        let error = check_snapshot_create_target(&dir, false)
+            .expect_err("existing dir without --force should be refused");
+        assert!(error.to_string().contains("already exists"));
+
+        let error = check_snapshot_create_target(&dir, true)
+            .expect_err("existing non-empty dir should be refused even with --force");
+        assert!(error.to_string().contains("exists and is not empty"));
+
+        let nested = root.join("a").join("b").join("snap");
+        check_snapshot_create_target(&nested, false)?;
+        assert!(nested.parent().is_some_and(Path::is_dir));
+        assert!(!nested.exists());
+
+        fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_snapshot_failure_leaves_no_final_dir_and_cleans_temp() -> Result<()> {
+        let root = temp_create_root("atomic-failure");
+        fs::create_dir_all(&root).into_diagnostic()?;
+        let dir = root.join("snap");
+        let runtime = unreachable_runtime(&root);
+
+        let result = create_snapshot(&runtime, &dir, false, no_moments_options()).await;
+
+        assert!(result.is_err());
+        assert!(!dir.exists());
+        assert_eq!(dir_entry_names(&root)?, Vec::<String>::new());
+        fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
 
     fn options(moments_contact_ids: Vec<u64>) -> SnapshotCreateOptions {
         SnapshotCreateOptions {
