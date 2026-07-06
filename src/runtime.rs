@@ -208,7 +208,11 @@ impl Runtime {
         tokens_from_value(data)
     }
 
-    pub(crate) async fn exchange_code(&self, code: &str) -> Result<AuthTokens> {
+    pub(crate) async fn exchange_code(
+        &self,
+        code: &str,
+        code_verifier: &str,
+    ) -> Result<AuthTokens> {
         let data = self
             .api_request(
                 Method::POST,
@@ -219,6 +223,7 @@ impl Runtime {
                     ("client_id", CLIENT_ID),
                     ("code", code),
                     ("redirect_uri", REDIRECT_URI),
+                    ("code_verifier", code_verifier),
                 ]),
             )
             .await?;
