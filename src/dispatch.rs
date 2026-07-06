@@ -20,20 +20,32 @@ fn write_checked(matches: &ArgMatches, report: Value, failure: &str) -> Result<(
 }
 
 pub(crate) fn install_diagnostics() {
-    let _ = miette::set_hook(Box::new(|_| {
-        Box::new(
-            miette::MietteHandlerOpts::new()
-                .terminal_links(true)
-                .unicode(true)
-                .context_lines(3)
-                .build(),
-        )
+    use std::io::IsTerminal;
+
+    // Agents drive this CLI through pipes and parse stderr. When stderr is
+    // not a terminal, drop ANSI colors, OSC-8 links, and unicode art, and
+    // never wrap lines: miette's default 80-column wrap breaks URLs and other
+    // long tokens mid-word, corrupting machine-parsed messages. Terminal
+    // rendering is unchanged.
+    let stderr_is_terminal = io::stderr().is_terminal();
+    let _ = miette::set_hook(Box::new(move |_| {
+        let opts = miette::MietteHandlerOpts::new().context_lines(3);
+        let opts = if stderr_is_terminal {
+            opts.terminal_links(true).unicode(true)
+        } else {
+            opts.terminal_links(false)
+                .color(false)
+                .unicode(false)
+                .wrap_lines(false)
+        };
+        Box::new(opts.build())
     }));
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(io::stderr)
+        .with_ansi(stderr_is_terminal)
         .try_init();
 }
 

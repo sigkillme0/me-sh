@@ -119,6 +119,8 @@ table
 
 long snapshot and archive commands draw progress on stderr only when stderr is a terminal. set `MESH_NO_PROGRESS=1` to silence it. `MESHX_NO_PROGRESS=1` still works for older setups.
 
+when stderr is not a terminal, error reports and retry warnings are plain ascii: no colors, no unicode art, no line wrapping.
+
 ## config
 
 the default config path is:
