@@ -196,25 +196,38 @@ pub(crate) fn collect_contact_strings(value: &Value, values: &mut Vec<String>) {
 }
 
 pub(crate) fn normalize_email_key(value: &str) -> Option<String> {
-    let value = value
-        .trim()
-        .trim_start_matches("mailto:")
-        .to_ascii_lowercase();
-    let at = value.rfind('@')?;
-    let local = value[..at]
-        .trim_end_matches(|ch: char| !is_email_local_char(ch))
-        .rsplit(|ch: char| !is_email_local_char(ch))
+    let value = value.trim();
+    let candidate = value
+        .rfind('<')
+        .and_then(|start| {
+            let inner = &value[start + 1..];
+            inner.find('>').map(|end| inner[..end].trim())
+        })
+        .unwrap_or(value);
+    let at = candidate.rfind('@')?;
+    let local = candidate[..at]
+        .trim_end_matches(is_email_local_separator)
+        .rsplit(is_email_local_separator)
         .next()
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .trim_matches('\'');
     if local.is_empty() {
         return None;
     }
-    let domain = email_domain_from_string(&value)?;
-    Some(format!("{local}@{domain}"))
+    let domain = email_domain_from_string(candidate)?;
+    Some(format!("{}@{domain}", local.to_lowercase()))
 }
 
-fn is_email_local_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '%' | '+' | '-')
+/// Characters that cannot appear in an unquoted email local part, so display
+/// strings like `Ada <ada@example.invalid>` or `mailto:ada@example.invalid`
+/// split at them. RFC 6531 allows non-ASCII letters in internationalized
+/// locals, so they must never be treated as separators.
+fn is_email_local_separator(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '<' | '>' | '(' | ')' | '[' | ']' | ':' | ';' | '@' | '\\' | ',' | '"'
+        )
 }
 
 pub(crate) fn normalize_phone_key(value: &str) -> Option<String> {
@@ -449,6 +462,42 @@ mod tests {
         assert_eq!(
             normalize_email_key("ada@example.invalid phone"),
             Some("ada@example.invalid".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_email_key_keeps_unicode_locals_distinct() {
+        assert_eq!(
+            normalize_email_key("maría@example.invalid"),
+            Some("maría@example.invalid".to_string())
+        );
+        assert_eq!(
+            normalize_email_key("sofía@example.invalid"),
+            Some("sofía@example.invalid".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_email_key_keeps_fully_non_ascii_locals() {
+        assert_eq!(
+            normalize_email_key("李明@example.invalid"),
+            Some("李明@example.invalid".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_email_key_extracts_unicode_address_from_display_text() {
+        assert_eq!(
+            normalize_email_key("María García <maría@example.invalid>"),
+            Some("maría@example.invalid".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_email_key_folds_unicode_uppercase_locals() {
+        assert_eq!(
+            normalize_email_key("MARÍA@Example.INVALID"),
+            Some("maría@example.invalid".to_string())
         );
     }
 
