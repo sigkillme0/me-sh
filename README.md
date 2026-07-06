@@ -121,6 +121,23 @@ long snapshot and archive commands draw progress on stderr only when stderr is a
 
 when stderr is not a terminal, error reports and retry warnings are plain ascii: no colors, no unicode art, no line wrapping.
 
+exit codes:
+
+```text
+0  success
+1  generic failure, including partial bulk-write failures that already printed a report
+2  usage error, reported by clap itself
+3  auth: not logged in, token refresh failed, or HTTP 401/403 from the api
+4  network: connect, timeout, or other transport error
+5  server returned any other non-2xx HTTP status
+```
+
+`--error-format json` (env `MESH_ERROR_FORMAT`, values `human`|`json`) replaces the human error report on stderr with one line of json. `class` and `exit_code` always agree with the exit codes above. `http` and `retry_after_seconds` are null when not applicable; usage errors are still reported by clap in human form.
+
+```json
+{"error":{"message":"...","chain":["each cause in order"],"class":"auth|network|http|other","exit_code":5,"http":{"status":500,"url":"...","body":{}},"retry_after_seconds":30}}
+```
+
 ## config
 
 the default config path is:

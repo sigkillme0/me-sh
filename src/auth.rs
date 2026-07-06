@@ -46,7 +46,10 @@ pub(crate) async fn login(runtime: &Runtime, open_browser: bool) -> Result<()> {
         // verifies it, and the token exchange still requires the verifier.
         code = oauth_code_from_stdin() => code?,
     };
-    let auth = runtime.exchange_code(&code, &code_verifier).await?;
+    let auth = runtime
+        .exchange_code(&code, &code_verifier)
+        .await
+        .map_err(|source| MeshError::auth_with_source("OAuth code exchange failed", source))?;
     runtime.write_config(&MeshConfig {
         auth: Some(auth.clone()),
         user: None,
@@ -86,7 +89,7 @@ pub(crate) async fn oauth_code_from_listener(
                 if callback.state.as_deref() != Some(expected_state) {
                     let body = "<html><body><h1>me.sh login failed</h1><p>State mismatch.</p></body></html>";
                     write_http_response(&mut stream, 400, body).await?;
-                    return err(
+                    return auth_err(
                         "OAuth callback state mismatch; aborting login. Re-run `mesh login` and use the freshly printed URL.",
                     );
                 }
@@ -122,7 +125,7 @@ pub(crate) async fn oauth_code_from_stdin() -> Result<String> {
     }
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return err("no callback URL or code was pasted");
+        return auth_err("no callback URL or code was pasted");
     }
     code_from_callback_text(trimmed)
 }
@@ -156,7 +159,7 @@ pub(crate) fn callback_from_http_request_line(line: &str) -> Result<OauthCallbac
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or_default();
     if method != "GET" {
-        return err("OAuth callback must be a GET request");
+        return auth_err("OAuth callback must be a GET request");
     }
     let url = Url::parse(&format!("{REDIRECT_URI}{path}"))
         .into_diagnostic()
@@ -187,9 +190,9 @@ pub(crate) fn callback_from_url(url: &Url) -> Result<OauthCallback> {
         }
     }
     if let Some(error) = error {
-        return err(format!("OAuth error: {error}"));
+        return auth_err(format!("OAuth error: {error}"));
     }
-    let code = code.ok_or_else(|| miette!("OAuth callback did not include code"))?;
+    let code = code.ok_or_else(|| MeshError::auth("OAuth callback did not include code"))?;
     Ok(OauthCallback { code, state })
 }
 
@@ -348,6 +351,20 @@ mod tests {
         let error = callback_from_url(&url).unwrap_err().to_string();
 
         assert_eq!(error, "OAuth error: denied");
+    }
+
+    #[test]
+    fn login_flow_failures_classify_as_auth() {
+        let url = Url::parse("http://127.0.0.1:6374/?error=access_denied").unwrap();
+        let report = callback_from_url(&url).unwrap_err();
+        assert_eq!(classify_report(&report), ErrorClass::Auth);
+
+        let url = Url::parse("http://127.0.0.1:6374/?state=only").unwrap();
+        let report = callback_from_url(&url).unwrap_err();
+        assert_eq!(classify_report(&report), ErrorClass::Auth);
+
+        let report = callback_from_http_request_line("POST / HTTP/1.1").unwrap_err();
+        assert_eq!(classify_report(&report), ErrorClass::Auth);
     }
 
     #[test]

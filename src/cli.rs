@@ -87,6 +87,15 @@ pub(crate) fn build_cli() -> Command {
                 .env("MESH_MCP_BASE")
                 .hide_env_values(true)
                 .default_value(MCP_BASE),
+        )
+        .arg(
+            Arg::new("error-format")
+                .long("error-format")
+                .global(true)
+                .help("Error output format for stderr. json prints a single-line machine-readable envelope.")
+                .value_parser(["human", "json"])
+                .env("MESH_ERROR_FORMAT")
+                .default_value("human"),
         );
 
     root = root
@@ -3170,4 +3179,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn error_format_parses_globally_and_on_subcommands() {
+        // Before the subcommand.
+        let matches = parse(&["mesh", "--error-format", "json", "whoami"]);
+        assert_eq!(
+            matches
+                .get_one::<String>("error-format")
+                .map(String::as_str),
+            Some("json"),
+        );
+
+        // After the subcommand, propagated to the subcommand matches.
+        let matches = parse(&["mesh", "whoami", "--error-format", "json"]);
+        let whoami = sub(&matches, "whoami");
+        assert_eq!(
+            whoami.get_one::<String>("error-format").map(String::as_str),
+            Some("json"),
+        );
+
+        // Rejects unknown values.
+        assert!(
+            build_cli()
+                .try_get_matches_from(["mesh", "whoami", "--error-format", "xml"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn error_format_defaults_to_human() {
+        // Ambient env would legitimately override the default; skip rather
+        // than racing other parallel tests by mutating the environment.
+        if std::env::var_os("MESH_ERROR_FORMAT").is_some() {
+            return;
+        }
+        let matches = parse(&["mesh", "whoami"]);
+        let whoami = sub(&matches, "whoami");
+        assert_eq!(
+            whoami.get_one::<String>("error-format").map(String::as_str),
+            Some("human"),
+        );
+    }
 }

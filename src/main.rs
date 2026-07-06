@@ -31,9 +31,28 @@ mod runtime;
 mod snapshot;
 
 #[tokio::main]
-async fn main() -> miette::Result<()> {
+async fn main() -> std::process::ExitCode {
     dispatch::install_diagnostics();
+    // Usage errors never reach this point: clap prints its own message and
+    // exits 2 from `get_matches`.
     let matches = cli::build_cli().get_matches();
+    // Decide the error rendering once, before running the command.
+    let error_format = error::error_format_from_matches(&matches);
+    match run(matches).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(report) => {
+            match error_format {
+                // Byte-identical to what `Termination` printed when main
+                // returned `miette::Result` directly.
+                error::ErrorFormat::Human => eprintln!("Error: {report:?}"),
+                error::ErrorFormat::Json => eprintln!("{}", error::error_envelope(&report)),
+            }
+            std::process::ExitCode::from(error::classify_report(&report).exit_code())
+        }
+    }
+}
+
+async fn run(matches: clap::ArgMatches) -> miette::Result<()> {
     let runtime = runtime::Runtime::from_matches(&matches)?;
     dispatch::run(matches, runtime).await
 }

@@ -169,24 +169,24 @@ impl Runtime {
         let auth = self
             .read_config()?
             .and_then(|config| config.auth)
-            .ok_or_else(|| miette!("not logged in. Run `mesh login` first."))?;
+            .ok_or_else(not_logged_in)?;
         if !token_expired(&auth) {
             return Ok(auth.access_token);
         }
         // Only one task may refresh at a time. Whoever loses the race re-reads
         // the config inside the lock and finds the token the winner just wrote.
         let _guard = self.refresh_lock.lock().await;
-        let mut config = self
-            .read_config()?
-            .ok_or_else(|| miette!("not logged in. Run `mesh login` first."))?;
-        let auth = config
-            .auth
-            .clone()
-            .ok_or_else(|| miette!("not logged in. Run `mesh login` first."))?;
+        let mut config = self.read_config()?.ok_or_else(not_logged_in)?;
+        let auth = config.auth.clone().ok_or_else(not_logged_in)?;
         if !token_expired(&auth) {
             return Ok(auth.access_token);
         }
-        let refreshed = self.refresh_token(&auth.refresh_token).await?;
+        let refreshed = self
+            .refresh_token(&auth.refresh_token)
+            .await
+            .map_err(|source| {
+                MeshError::auth_with_source("token refresh failed; run `mesh login` again", source)
+            })?;
         config.auth = Some(refreshed.clone());
         self.write_config(&config)?;
         Ok(refreshed.access_token)
