@@ -284,6 +284,7 @@ mod tests {
             mcp_base: MCP_BASE.to_string(),
             timeout: Duration::from_secs(5),
             retries: 0,
+            refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         };
         for path in std::iter::once(&runtime.config_path).chain(&runtime.legacy_config_paths) {
             fs::write(path, "{}").into_diagnostic()?;

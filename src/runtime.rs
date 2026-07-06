@@ -1,5 +1,7 @@
 use crate::prelude::*;
 
+use std::sync::Arc;
+
 #[derive(Clone, Debug)]
 pub(crate) struct Runtime {
     pub(crate) http: HttpClient,
@@ -9,6 +11,11 @@ pub(crate) struct Runtime {
     pub(crate) mcp_base: String,
     pub(crate) timeout: Duration,
     pub(crate) retries: u32,
+    /// Serializes token refreshes across clones: bulk fan-outs clone the
+    /// `Runtime` into up to 16 tasks, and without this every task would fire
+    /// its own refresh POST and rewrite the config (fatal when the server
+    /// rotates refresh tokens). Shared via `Arc` so clones contend on one lock.
+    pub(crate) refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +126,7 @@ impl Runtime {
             mcp_base,
             timeout,
             retries,
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -158,6 +166,16 @@ impl Runtime {
         {
             return Ok(token);
         }
+        let auth = self
+            .read_config()?
+            .and_then(|config| config.auth)
+            .ok_or_else(|| miette!("not logged in. Run `mesh login` first."))?;
+        if !token_expired(&auth) {
+            return Ok(auth.access_token);
+        }
+        // Only one task may refresh at a time. Whoever loses the race re-reads
+        // the config inside the lock and finds the token the winner just wrote.
+        let _guard = self.refresh_lock.lock().await;
         let mut config = self
             .read_config()?
             .ok_or_else(|| miette!("not logged in. Run `mesh login` first."))?;
@@ -526,6 +544,7 @@ mod tests {
             mcp_base: MCP_BASE.to_string(),
             timeout: Duration::from_secs(5),
             retries: 0,
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -586,6 +605,33 @@ mod tests {
             !legacy_path.exists(),
             "legacy plaintext token file is removed after migration"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn runtime_clones_share_the_refresh_lock() {
+        let runtime = test_runtime(temp_config_dir("shared-lock").join("mesh.json"));
+        let clone = runtime.clone();
+
+        assert!(Arc::ptr_eq(&runtime.refresh_lock, &clone.refresh_lock));
+    }
+
+    #[tokio::test]
+    async fn access_token_returns_unexpired_token_without_refreshing() {
+        let dir = temp_config_dir("access-token");
+        let runtime = test_runtime(dir.join("mesh.json"));
+        runtime
+            .write_config(&MeshConfig {
+                auth: Some(auth_tokens(now_millis().saturating_add(3_600_000))),
+                user: None,
+            })
+            .unwrap();
+
+        // retries = 0 and no reachable server: any refresh attempt would fail,
+        // so success proves the fresh token is served straight from disk.
+        let token = runtime.access_token().await.unwrap();
+
+        assert_eq!(token, "access-token-value");
         fs::remove_dir_all(&dir).unwrap();
     }
 }
